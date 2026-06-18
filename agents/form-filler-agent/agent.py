@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 import redis
 from anthropic import Anthropic
-from prometheus_api.agent import PrometheusAgent
+from prometheus_api.agent import MissingInput, PrometheusAgent
 from prometheus_api.redis_utils import create_redis_client
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
@@ -499,12 +499,34 @@ Return ONLY the JSON object, no explanation:"""
                 "agent": "Form Filler Agent",
             }
         else:
-            # Still missing fields - generate followup questions
+            # Still missing fields - emit a canonical INPUT_REQUIRED event so the
+            # orchestrator (tool_discovery keys off the A2A input-required task
+            # state) routes this back to the user instead of treating the
+            # half-filled form as a completed result.
             logger.info(f"Missing fields: {missing}")
             questions = self.generate_followup_questions(state, missing)
 
+            q_type_to_input_type = {"select": "enum", "number": "number", "text": "string"}
+            missing_inputs = [
+                MissingInput(
+                    name=q["field"],
+                    description=q["question"],
+                    user_prompt=q["question"],
+                    type=q_type_to_input_type.get(q["type"], "string"),
+                    options=q.get("options"),
+                    required=q.get("required", True),
+                )
+                for q in questions
+            ]
+            await self.send_input_required(
+                context=a2a_context,
+                event_queue=event_queue,
+                missing_inputs=missing_inputs,
+                hint="Some required form fields could not be filled from the provided context.",
+            )
+
             return {
-                "status": "needs_info",
+                "status": "input_required",
                 "conversation_id": conversation_id,
                 "followup_questions": questions,
                 "partial_data": state["extracted_values"],

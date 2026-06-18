@@ -827,12 +827,6 @@ except Exception as e:
             logger.error(f"Error converting PDF: {e}", exc_info=True)
             return ""
 
-    def convert_pdf_to_text(self, pdf_path: str) -> str:
-        """Synchronous wrapper for backward compatibility."""
-        return asyncio.get_event_loop().run_until_complete(
-            self.convert_pdf_to_text_async(pdf_path)
-        )
-
     def extract_answer_from_paper(self, question: str, paper_text: str, title: str) -> Dict[str, Any]:
         """Use Claude to extract answer from paper text."""
         # Limit paper text to avoid token limits
