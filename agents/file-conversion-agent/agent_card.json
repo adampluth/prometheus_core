@@ -1,0 +1,39 @@
+{
+  "name": "File Conversion Agent",
+  "description": "Converts reusable conversation file artifacts into requested target formats.",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "pdf_to_markdown",
+      "name": "PDF To Markdown",
+      "description": "Convert an existing PDF artifact into a Markdown artifact.",
+      "usage_notes": "Requires artifact_id of an existing PDF artifact in the current conversation. Use when the user explicitly asks to convert a PDF to Markdown or when a workflow needs Markdown extracted from a PDF artifact.",
+      "requires_approval": false,
+      "expected_duration_seconds": 180,
+      "output_format": "JSON with status, source artifact metadata, and converted Markdown artifact metadata",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "artifact_id": {
+            "type": "string",
+            "description": "Artifact ID of the PDF to convert.",
+            "x_artifact_ref": "single"
+          },
+          "name": {
+            "type": "string",
+            "description": "Optional output filename. '.md' will be enforced."
+          },
+          "description": {
+            "type": "string",
+            "description": "Optional human-readable description for the generated Markdown artifact."
+          }
+        },
+        "required": ["artifact_id"]
+      }
+    }
+  ]
+}

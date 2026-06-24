@@ -21,7 +21,7 @@ x-common-volumes: &common-volumes
   - ./shared:/app/shared
 
 x-build-args: &prometheus-api-build-args
-  PROMETHEUS_API_BASE_IMAGE_HASH: ${PROMETHEUS_API_BASE_IMAGE_HASH:-}
+  PROMETHEUS_API_BASE_IMAGE_HASH: ${PROMETHEUS_API_BASE_IMAGE_HASH:-latest}
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-}
