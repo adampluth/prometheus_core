@@ -1,6 +1,7 @@
 services:
   file-conversion-agent:
     build:
+      context: .
       args:
         - PROMETHEUS_API_BASE_IMAGE_HASH=${PROMETHEUS_API_BASE_IMAGE_HASH:-latest}
         - HTTP_PROXY=${HTTP_PROXY:-}
@@ -12,9 +13,6 @@ services:
     environment:
       AGENT_PORT: 8000
       AGENT_SECRET: ${AGENT_SECRET}
-      SSL_CERT_FILE: /etc/ssl/certs/ca-bundle.pem
-      REQUESTS_CA_BUNDLE: /etc/ssl/certs/ca-bundle.pem
-      NODE_EXTRA_CA_CERTS: /etc/ssl/certs/ca-bundle.pem
       REGISTRY_URL: ${REGISTRY_URL:-}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379}
@@ -30,7 +28,6 @@ services:
       litellm:
         condition: service_healthy
     volumes:
-      - ../../certs/ca-bundle.pem:/etc/ssl/certs/ca-bundle.pem
       - ../../shared:/app/shared
       - file-conversion-model-cache:/root/.cache/datalab
       - file-conversion-huggingface-cache:/root/.cache/huggingface
