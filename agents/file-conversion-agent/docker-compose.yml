@@ -29,12 +29,4 @@ services:
         condition: service_healthy
     volumes:
       - ../../shared:/app/shared
-      - file-conversion-model-cache:/root/.cache/datalab
-      - file-conversion-huggingface-cache:/root/.cache/huggingface
-      - file-conversion-torch-cache:/root/.cache/torch
     restart: unless-stopped
-
-volumes:
-  file-conversion-model-cache:
-  file-conversion-huggingface-cache:
-  file-conversion-torch-cache:

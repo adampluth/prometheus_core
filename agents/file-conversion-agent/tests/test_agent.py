@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
 
@@ -15,8 +17,16 @@ _SPEC = importlib.util.spec_from_file_location("file_conversion_agent_module", A
 assert _SPEC and _SPEC.loader
 _MODULE = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MODULE)
+sys.modules.setdefault("agent", _MODULE)
+_SMOKE_SPEC = importlib.util.spec_from_file_location(
+    "pdf_to_markdown_smoke_module", AGENT_DIR / "pdf_to_markdown_smoke.py"
+)
+assert _SMOKE_SPEC and _SMOKE_SPEC.loader
+_SMOKE_MODULE = importlib.util.module_from_spec(_SMOKE_SPEC)
+_SMOKE_SPEC.loader.exec_module(_SMOKE_MODULE)
 
 FileConversionAgent = _MODULE.FileConversionAgent
+PdfToMarkdownWorker = _MODULE.PdfToMarkdownWorker
 
 
 def _context() -> MagicMock:
@@ -95,7 +105,8 @@ def test_pdf_to_markdown_uploads_markdown_artifact(monkeypatch, tmp_path: Path) 
         worker.output_markdown.write_text("# Converted\n", encoding="utf-8")
         return {
             "status": "converted",
-            "conversion_backend": "marker-pdf",
+            "conversion_backend": "opendataloader-pdf",
+            "conversion_backend_mode": "fast",
             "elapsed_seconds": 1,
             "output_path": str(worker.output_markdown),
         }
@@ -136,4 +147,110 @@ def test_pdf_to_markdown_uploads_markdown_artifact(monkeypatch, tmp_path: Path) 
     assert captured["mime_type"] == "text/markdown"
     assert captured["tags"] == ["markdown", "converted", "pdf-to-markdown"]
     assert captured["metadata"]["source_artifact_id"] == "pdf-1"
-    assert captured["metadata"]["conversion_backend"] == "marker-pdf"
+    assert captured["metadata"]["conversion_backend"] == "opendataloader-pdf"
+    assert captured["metadata"]["conversion_backend_mode"] == "fast"
+    assert result["conversion_backend"] == "opendataloader-pdf"
+    assert result["conversion_backend_mode"] == "fast"
+
+
+def test_pdf_to_markdown_worker_invokes_opendataloader(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-1.7\n")
+    output = tmp_path / "converted.md"
+    commands = []
+
+    class FakeProcess:
+        returncode = 0
+
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+            output_dir = Path(command[command.index("--output-dir") + 1])
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "source.md").write_text("# Converted\n", encoding="utf-8")
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return "", ""
+
+    monkeypatch.setattr(_MODULE.subprocess, "Popen", FakeProcess)
+
+    worker = PdfToMarkdownWorker(source_pdf=source, output_markdown=output)
+    monkeypatch.setattr(worker, "emit_status_update", lambda *args, **kwargs: None)
+
+    result = worker.run()
+
+    command = commands[0]
+    assert command[0] == "opendataloader-pdf"
+    assert command[1] == str(source)
+    assert command[command.index("--format") + 1] == "markdown"
+    assert command[command.index("--image-output") + 1] == "off"
+    assert "--hybrid" not in command
+    assert output.read_text(encoding="utf-8") == "# Converted\n"
+    assert result["status"] == "converted"
+    assert result["conversion_backend"] == "opendataloader-pdf"
+    assert result["conversion_backend_mode"] == "fast"
+
+
+def test_pdf_to_markdown_worker_reports_opendataloader_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-1.7\n")
+    output = tmp_path / "converted.md"
+
+    class FakeProcess:
+        returncode = 1
+
+        def __init__(self, command, **kwargs):
+            pass
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self):
+            return "", "java failed"
+
+    monkeypatch.setattr(_MODULE.subprocess, "Popen", FakeProcess)
+
+    worker = PdfToMarkdownWorker(source_pdf=source, output_markdown=output)
+    monkeypatch.setattr(worker, "emit_status_update", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="opendataloader-pdf failed: java failed"):
+        worker.run()
+
+
+def test_pdf_to_markdown_smoke_script_invokes_worker(monkeypatch, tmp_path: Path, capsys) -> None:
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF-1.7\n")
+    output = tmp_path / "source.md"
+    captured = {}
+
+    class FakeWorker:
+        def __init__(self, *, source_pdf, output_markdown, timeout_seconds):
+            captured["source_pdf"] = source_pdf
+            captured["output_markdown"] = output_markdown
+            captured["timeout_seconds"] = timeout_seconds
+
+        def run(self):
+            output.write_text("# Converted\n", encoding="utf-8")
+            return {
+                "status": "converted",
+                "conversion_backend": "opendataloader-pdf",
+                "conversion_backend_mode": "fast",
+                "output_path": str(output),
+            }
+
+    monkeypatch.setattr(_SMOKE_MODULE, "LocalPdfToMarkdownWorker", FakeWorker)
+
+    status = _SMOKE_MODULE.main([str(source), str(output), "--timeout-seconds", "7"])
+
+    out = capsys.readouterr().out
+    assert status == 0
+    assert '"status": "converted"' in out
+    assert captured["source_pdf"] == source
+    assert captured["output_markdown"] == output
+    assert captured["timeout_seconds"] == 7
+    assert output.read_text(encoding="utf-8") == "# Converted\n"

@@ -7,8 +7,8 @@ first supported conversion is PDF to Markdown.
 
 import os
 import re
+import shutil
 import subprocess
-import sys
 import tempfile
 import time
 import uuid
@@ -23,7 +23,9 @@ from prometheus_api.storage_client.connection import ConnectionConfig
 
 SKILL_PDF_TO_MARKDOWN = "pdf_to_markdown"
 MARKDOWN_MIME_TYPE = "text/markdown"
-DEFAULT_MARKER_TIMEOUT_SECONDS = 900
+OPENDATALOADER_BACKEND = "opendataloader-pdf"
+OPENDATALOADER_BACKEND_MODE = "fast"
+DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS = 900
 WORKER_POLL_INTERVAL_SECONDS = 1.0
 
 
@@ -36,14 +38,14 @@ def _try_storage_config() -> Optional[ConnectionConfig]:
 
 
 class PdfToMarkdownWorker(PrometheusWorker):
-    """Run Marker PDF conversion off the event loop."""
+    """Run OpenDataLoader PDF conversion off the event loop."""
 
     def __init__(
         self,
         *,
         source_pdf: Path,
         output_markdown: Path,
-        timeout_seconds: int = DEFAULT_MARKER_TIMEOUT_SECONDS,
+        timeout_seconds: int = DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS,
     ) -> None:
         super().__init__()
         self.source_pdf = source_pdf
@@ -52,97 +54,108 @@ class PdfToMarkdownWorker(PrometheusWorker):
 
     def run(self) -> Dict[str, Any]:
         start = time.monotonic()
-        self.emit_status_update("Starting PDF to Markdown conversion with marker-pdf.")
+        self.emit_status_update("Starting PDF to Markdown conversion with opendataloader-pdf.")
 
         if not self.source_pdf.exists():
             raise RuntimeError(f"PDF file does not exist: {self.source_pdf}")
 
-        result = self._run_marker_subprocess(start)
+        result = self._run_opendataloader_subprocess(start)
         if result.get("status") == "cancelled":
             return result
 
         if not self.output_markdown.exists() or self.output_markdown.stat().st_size == 0:
-            raise RuntimeError("marker-pdf did not produce a Markdown file.")
+            raise RuntimeError("opendataloader-pdf did not produce a Markdown file.")
 
         elapsed = int(time.monotonic() - start)
         self.emit_status_update(f"PDF to Markdown conversion finished in {elapsed}s.")
         return {
             "status": "converted",
-            "conversion_backend": "marker-pdf",
+            "conversion_backend": OPENDATALOADER_BACKEND,
+            "conversion_backend_mode": OPENDATALOADER_BACKEND_MODE,
             "elapsed_seconds": elapsed,
             "output_path": str(self.output_markdown),
         }
 
-    def _run_marker_subprocess(self, start: float) -> Dict[str, Any]:
-        script = """
-import os
-import sys
-from pathlib import Path
-
-os.environ["CUDA_VISIBLE_DEVICES"] = ""
-os.environ["TORCH_NUM_THREADS"] = "1"
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-
-from marker.converters.pdf import PdfConverter
-from marker.models import create_model_dict
-from marker.output import text_from_rendered
-
-source_pdf = Path(sys.argv[1])
-output_markdown = Path(sys.argv[2])
-
-converter = PdfConverter(artifact_dict=create_model_dict())
-rendered = converter(str(source_pdf))
-text, _, _ = text_from_rendered(rendered)
-output_markdown.write_text(text or "", encoding="utf-8")
-"""
-
-        env = {
-            **os.environ,
-            "CUDA_VISIBLE_DEVICES": "",
-            "TORCH_NUM_THREADS": "1",
-            "OMP_NUM_THREADS": "1",
-            "MKL_NUM_THREADS": "1",
-            "PYTHONUNBUFFERED": "1",
-        }
-        proc = subprocess.Popen(
-            [sys.executable, "-c", script, str(self.source_pdf), str(self.output_markdown)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=env,
-        )
-
-        last_status = start
-        while proc.poll() is None:
-            elapsed = time.monotonic() - start
-            if self.cancelled:
-                self._terminate_process(proc)
-                return {
-                    "status": "cancelled",
-                    "conversion_backend": "marker-pdf",
-                    "elapsed_seconds": int(elapsed),
-                }
-            if elapsed > self.timeout_seconds:
-                self._terminate_process(proc)
+    def _run_opendataloader_subprocess(self, start: float) -> Dict[str, Any]:
+        with tempfile.TemporaryDirectory() as tmp:
+            output_dir = Path(tmp)
+            command = [
+                "opendataloader-pdf",
+                str(self.source_pdf),
+                "--output-dir",
+                str(output_dir),
+                "--format",
+                "markdown",
+                "--image-output",
+                "off",
+                "--quiet",
+            ]
+            try:
+                proc = subprocess.Popen(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    env={**os.environ, "PYTHONUNBUFFERED": "1"},
+                )
+            except FileNotFoundError as exc:
                 raise RuntimeError(
-                    f"marker-pdf timed out after {self.timeout_seconds}s."
-                )
-            if time.monotonic() - last_status >= 10:
-                self.emit_status_update(
-                    f"Converting PDF to Markdown... {int(elapsed)}s elapsed."
-                )
-                last_status = time.monotonic()
-            time.sleep(1)
+                    "opendataloader-pdf executable was not found in PATH."
+                ) from exc
 
-        stdout, stderr = proc.communicate()
-        if proc.returncode != 0:
-            details = (stderr or stdout or "").strip()
-            if len(details) > 4000:
-                details = details[-4000:]
-            raise RuntimeError(f"marker-pdf failed: {details or 'unknown error'}")
+            last_status = start
+            while proc.poll() is None:
+                elapsed = time.monotonic() - start
+                if self.cancelled:
+                    self._terminate_process(proc)
+                    return {
+                        "status": "cancelled",
+                        "conversion_backend": OPENDATALOADER_BACKEND,
+                        "conversion_backend_mode": OPENDATALOADER_BACKEND_MODE,
+                        "elapsed_seconds": int(elapsed),
+                    }
+                if elapsed > self.timeout_seconds:
+                    self._terminate_process(proc)
+                    raise RuntimeError(
+                        f"opendataloader-pdf timed out after {self.timeout_seconds}s."
+                    )
+                if time.monotonic() - last_status >= 10:
+                    self.emit_status_update(
+                        f"Converting PDF to Markdown... {int(elapsed)}s elapsed."
+                    )
+                    last_status = time.monotonic()
+                time.sleep(1)
+
+            stdout, stderr = proc.communicate()
+            if proc.returncode != 0:
+                details = (stderr or stdout or "").strip()
+                if len(details) > 4000:
+                    details = details[-4000:]
+                raise RuntimeError(
+                    f"opendataloader-pdf failed: {details or 'unknown error'}"
+                )
+
+            generated_markdown = self._find_generated_markdown(output_dir)
+            self.output_markdown.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(generated_markdown, self.output_markdown)
 
         return {"status": "converted"}
+
+    def _find_generated_markdown(self, output_dir: Path) -> Path:
+        markdown_files = sorted(output_dir.rglob("*.md"))
+        if not markdown_files:
+            raise RuntimeError("opendataloader-pdf did not write any Markdown files.")
+
+        expected_name = f"{self.source_pdf.stem}.md"
+        for path in markdown_files:
+            if path.name == expected_name:
+                return path
+
+        if len(markdown_files) == 1:
+            return markdown_files[0]
+
+        names = ", ".join(path.name for path in markdown_files[:10])
+        raise RuntimeError(f"opendataloader-pdf wrote multiple Markdown files: {names}")
 
     @staticmethod
     def _terminate_process(proc: subprocess.Popen[str]) -> None:
@@ -299,7 +312,7 @@ class FileConversionAgent(PrometheusAgent):
             worker = PdfToMarkdownWorker(
                 source_pdf=source_pdf,
                 output_markdown=markdown_path,
-                timeout_seconds=DEFAULT_MARKER_TIMEOUT_SECONDS,
+                timeout_seconds=DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS,
             )
 
             try:
@@ -344,7 +357,12 @@ class FileConversionAgent(PrometheusAgent):
                 metadata={
                     "source_artifact_id": artifact_id,
                     "source_artifact_name": source_name,
-                    "conversion_backend": conversion_result.get("conversion_backend", "marker-pdf"),
+                    "conversion_backend": conversion_result.get(
+                        "conversion_backend", OPENDATALOADER_BACKEND
+                    ),
+                    "conversion_backend_mode": conversion_result.get(
+                        "conversion_backend_mode", OPENDATALOADER_BACKEND_MODE
+                    ),
                 },
             )
 
@@ -369,7 +387,12 @@ class FileConversionAgent(PrometheusAgent):
             "artifact_id": output_ref.artifact_id,
             "artifact_name": output_ref.name,
             "artifact_uri": output_ref.uri,
-            "conversion_backend": conversion_result.get("conversion_backend", "marker-pdf"),
+            "conversion_backend": conversion_result.get(
+                "conversion_backend", OPENDATALOADER_BACKEND
+            ),
+            "conversion_backend_mode": conversion_result.get(
+                "conversion_backend_mode", OPENDATALOADER_BACKEND_MODE
+            ),
         }
 
 
