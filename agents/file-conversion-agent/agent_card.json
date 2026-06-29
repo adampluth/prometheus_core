@@ -30,6 +30,11 @@
           "description": {
             "type": "string",
             "description": "Optional human-readable description for the generated Markdown artifact."
+          },
+          "fast_mode": {
+            "type": "boolean",
+            "description": "Use OpenDataLoader's local fast parser instead of the default Docling hybrid parser.",
+            "default": false
           }
         },
         "required": ["artifact_id"]

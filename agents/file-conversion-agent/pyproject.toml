@@ -4,5 +4,5 @@ version = "0.1.0"
 description = "Artifact-aware file conversion agent"
 requires-python = ">=3.12"
 dependencies = [
-    "opendataloader-pdf>=2.4,<3",
+    "opendataloader-pdf[hybrid]>=2.4,<3",
 ]

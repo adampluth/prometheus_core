@@ -33,6 +33,11 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         default=DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS,
         help=f"Conversion timeout in seconds. Default: {DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS}.",
     )
+    parser.add_argument(
+        "--fast-mode",
+        action="store_true",
+        help="Use OpenDataLoader's local fast parser instead of the default hybrid parser.",
+    )
     return parser.parse_args(argv)
 
 
@@ -53,6 +58,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         source_pdf=source_pdf,
         output_markdown=output_markdown,
         timeout_seconds=args.timeout_seconds,
+        fast_mode=args.fast_mode,
     )
     result = worker.run()
     print(json.dumps(result, indent=2))

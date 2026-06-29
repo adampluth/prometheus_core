@@ -19,6 +19,8 @@ services:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
       AGENT_SECRET_REQUIRED: ${AGENT_SECRET_REQUIRED:-true}
       PYTHONDONTWRITEBYTECODE: 1
+      OPENDATALOADER_HYBRID_URL: ${OPENDATALOADER_HYBRID_URL:-http://file-conversion-hybrid:5002}
+      OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS: ${OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS:-0}
       DEEPLYNX_BASE_URL: ${DEEPLYNX_BASE_URL:-https://deeplynx.inl.gov/api/v1}
       DEEPLYNX_KEY: ${DEEPLYNX_KEY:-}
       DEEPLYNX_SECRET: ${DEEPLYNX_SECRET:-}
@@ -27,6 +29,49 @@ services:
     depends_on:
       litellm:
         condition: service_healthy
+      file-conversion-hybrid:
+        condition: service_healthy
     volumes:
       - ../../shared:/app/shared
     restart: unless-stopped
+
+  file-conversion-hybrid:
+    build:
+      context: .
+      args:
+        - PROMETHEUS_API_BASE_IMAGE_HASH=${PROMETHEUS_API_BASE_IMAGE_HASH:-latest}
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
+    container_name: file-conversion-hybrid
+    networks:
+      - agent-network
+    command:
+      - opendataloader-pdf-hybrid
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5002"
+      - --device
+      - ${OPENDATALOADER_HYBRID_DEVICE:-auto}
+    environment:
+      PYTHONDONTWRITEBYTECODE: 1
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,litellm,litellm-db,redis,client-agent,file-conversion-agent,file-conversion-hybrid}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5002/health')"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    volumes:
+      - file-conversion-huggingface-cache:/root/.cache/huggingface
+      - file-conversion-torch-cache:/root/.cache/torch
+      - file-conversion-easyocr-cache:/root/.EasyOCR
+    restart: unless-stopped
+
+volumes:
+  file-conversion-huggingface-cache:
+  file-conversion-torch-cache:
+  file-conversion-easyocr-cache:

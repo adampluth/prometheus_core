@@ -24,7 +24,12 @@ from prometheus_api.storage_client.connection import ConnectionConfig
 SKILL_PDF_TO_MARKDOWN = "pdf_to_markdown"
 MARKDOWN_MIME_TYPE = "text/markdown"
 OPENDATALOADER_BACKEND = "opendataloader-pdf"
-OPENDATALOADER_BACKEND_MODE = "fast"
+OPENDATALOADER_FAST_BACKEND_MODE = "fast"
+OPENDATALOADER_HYBRID_BACKEND_MODE = "hybrid"
+OPENDATALOADER_HYBRID_BACKEND = "docling-fast"
+OPENDATALOADER_HYBRID_MODE = "full"
+DEFAULT_OPENDATALOADER_HYBRID_URL = "http://file-conversion-hybrid:5002"
+DEFAULT_OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS = 0
 DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS = 900
 WORKER_POLL_INTERVAL_SECONDS = 1.0
 
@@ -46,15 +51,24 @@ class PdfToMarkdownWorker(PrometheusWorker):
         source_pdf: Path,
         output_markdown: Path,
         timeout_seconds: int = DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS,
+        fast_mode: bool = False,
+        hybrid_url: str = DEFAULT_OPENDATALOADER_HYBRID_URL,
+        hybrid_timeout_milliseconds: int = DEFAULT_OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS,
     ) -> None:
         super().__init__()
         self.source_pdf = source_pdf
         self.output_markdown = output_markdown
         self.timeout_seconds = timeout_seconds
+        self.fast_mode = fast_mode
+        self.hybrid_url = hybrid_url
+        self.hybrid_timeout_milliseconds = hybrid_timeout_milliseconds
 
     def run(self) -> Dict[str, Any]:
         start = time.monotonic()
-        self.emit_status_update("Starting PDF to Markdown conversion with opendataloader-pdf.")
+        backend_mode = self._backend_mode()
+        self.emit_status_update(
+            f"Starting PDF to Markdown conversion with opendataloader-pdf ({backend_mode} mode)."
+        )
 
         if not self.source_pdf.exists():
             raise RuntimeError(f"PDF file does not exist: {self.source_pdf}")
@@ -71,10 +85,17 @@ class PdfToMarkdownWorker(PrometheusWorker):
         return {
             "status": "converted",
             "conversion_backend": OPENDATALOADER_BACKEND,
-            "conversion_backend_mode": OPENDATALOADER_BACKEND_MODE,
+            "conversion_backend_mode": backend_mode,
             "elapsed_seconds": elapsed,
             "output_path": str(self.output_markdown),
         }
+
+    def _backend_mode(self) -> str:
+        return (
+            OPENDATALOADER_FAST_BACKEND_MODE
+            if self.fast_mode
+            else OPENDATALOADER_HYBRID_BACKEND_MODE
+        )
 
     def _run_opendataloader_subprocess(self, start: float) -> Dict[str, Any]:
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,6 +111,19 @@ class PdfToMarkdownWorker(PrometheusWorker):
                 "off",
                 "--quiet",
             ]
+            if not self.fast_mode:
+                command.extend(
+                    [
+                        "--hybrid",
+                        OPENDATALOADER_HYBRID_BACKEND,
+                        "--hybrid-mode",
+                        OPENDATALOADER_HYBRID_MODE,
+                        "--hybrid-url",
+                        self.hybrid_url,
+                        "--hybrid-timeout",
+                        str(self.hybrid_timeout_milliseconds),
+                    ]
+                )
             try:
                 proc = subprocess.Popen(
                     command,
@@ -111,7 +145,7 @@ class PdfToMarkdownWorker(PrometheusWorker):
                     return {
                         "status": "cancelled",
                         "conversion_backend": OPENDATALOADER_BACKEND,
-                        "conversion_backend_mode": OPENDATALOADER_BACKEND_MODE,
+                        "conversion_backend_mode": self._backend_mode(),
                         "elapsed_seconds": int(elapsed),
                     }
                 if elapsed > self.timeout_seconds:
@@ -218,6 +252,35 @@ class FileConversionAgent(PrometheusAgent):
         base = Path(requested_name).stem if requested_name else Path(source_name).stem
         return f"{FileConversionAgent._sanitize_stem(base)}.md"
 
+    @staticmethod
+    def _fast_mode(params: Mapping[str, Any]) -> bool:
+        if "fast_mode" not in params:
+            return False
+        value = params.get("fast_mode", False)
+        if isinstance(value, bool):
+            return value
+        raise ValueError("Parameter 'fast_mode' must be a boolean.")
+
+    @staticmethod
+    def _hybrid_timeout_milliseconds() -> int:
+        value = os.getenv(
+            "OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS",
+            str(DEFAULT_OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS),
+        )
+        try:
+            timeout = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                "Environment variable OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS "
+                "must be an integer."
+            ) from exc
+        if timeout < 0:
+            raise ValueError(
+                "Environment variable OPENDATALOADER_HYBRID_TIMEOUT_MILLISECONDS "
+                "must not be negative."
+            )
+        return timeout
+
     async def _execute(
         self,
         params: Dict[str, Any],
@@ -239,6 +302,28 @@ class FileConversionAgent(PrometheusAgent):
         event_queue: EventQueue,
     ) -> Dict[str, Any]:
         conversation_id = str(params.get("conversation_id") or context.context_id or str(uuid.uuid4()))
+
+        try:
+            fast_mode = self._fast_mode(params)
+        except ValueError as exc:
+            return {
+                "status": "error",
+                "conversation_id": conversation_id,
+                "message": str(exc),
+            }
+        requested_backend_mode = (
+            OPENDATALOADER_FAST_BACKEND_MODE
+            if fast_mode
+            else OPENDATALOADER_HYBRID_BACKEND_MODE
+        )
+        try:
+            hybrid_timeout_milliseconds = self._hybrid_timeout_milliseconds()
+        except ValueError as exc:
+            return {
+                "status": "error",
+                "conversation_id": conversation_id,
+                "message": str(exc),
+            }
 
         storage_config = _try_storage_config()
         if storage_config is None:
@@ -313,6 +398,11 @@ class FileConversionAgent(PrometheusAgent):
                 source_pdf=source_pdf,
                 output_markdown=markdown_path,
                 timeout_seconds=DEFAULT_OPENDATALOADER_TIMEOUT_SECONDS,
+                fast_mode=fast_mode,
+                hybrid_url=os.getenv(
+                    "OPENDATALOADER_HYBRID_URL", DEFAULT_OPENDATALOADER_HYBRID_URL
+                ),
+                hybrid_timeout_milliseconds=hybrid_timeout_milliseconds,
             )
 
             try:
@@ -337,6 +427,9 @@ class FileConversionAgent(PrometheusAgent):
                     "message": f"PDF to Markdown conversion cancelled for '{source_name}'.",
                     "source_artifact": source_dict,
                     "conversion_backend": conversion_result.get("conversion_backend"),
+                    "conversion_backend_mode": conversion_result.get(
+                        "conversion_backend_mode", requested_backend_mode
+                    ),
                 }
 
             await self.send_status_update(
@@ -361,7 +454,7 @@ class FileConversionAgent(PrometheusAgent):
                         "conversion_backend", OPENDATALOADER_BACKEND
                     ),
                     "conversion_backend_mode": conversion_result.get(
-                        "conversion_backend_mode", OPENDATALOADER_BACKEND_MODE
+                        "conversion_backend_mode", requested_backend_mode
                     ),
                 },
             )
@@ -391,7 +484,7 @@ class FileConversionAgent(PrometheusAgent):
                 "conversion_backend", OPENDATALOADER_BACKEND
             ),
             "conversion_backend_mode": conversion_result.get(
-                "conversion_backend_mode", OPENDATALOADER_BACKEND_MODE
+                "conversion_backend_mode", requested_backend_mode
             ),
         }
 

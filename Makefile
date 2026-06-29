@@ -17,6 +17,7 @@ COMPOSE := docker compose -p $(COMPOSE_PROJECT_NAME)
 
 COMPOSE_BASE   := docker-compose.yml
 COMPOSE_AGENTS := docker-compose.agents.yml
+COMPOSE_CUDA   := docker-compose.cuda.yml
 CLEAR_COMPOSE_FILES ?= $(COMPOSE_FILES_NG)
 
 # Override this to pin a specific prometheus_api base image.
@@ -27,6 +28,10 @@ export PROMETHEUS_API_BASE_IMAGE_HASH
 # agents/debug-agents/*/docker-compose.yml (one extra directory level deep).
 # Default: false.
 DEBUG_AGENTS ?= false
+
+# Set USE_CUDA=true to include docker-compose.cuda.yml, which requests NVIDIA
+# GPUs for services that can use them. Requires NVIDIA Container Toolkit on Linux.
+USE_CUDA ?= false
 
 # All per-agent compose files found on disk (checked-out submodules only).
 AGENT_COMPOSE_FILES := $(shell find agents -mindepth 2 -maxdepth 2 -name docker-compose.yml 2>/dev/null | sort)
@@ -39,6 +44,9 @@ COMPOSE_FILES := -f $(COMPOSE_BASE)
 ifneq ($(AGENT_COMPOSE_FILES),)
 COMPOSE_FILES += -f $(COMPOSE_AGENTS)
 endif
+ifeq ($(USE_CUDA),true)
+COMPOSE_FILES += -f $(COMPOSE_CUDA)
+endif
 # Automatically include docker-compose.override.yml if present (local dev overrides).
 ifneq ($(wildcard docker-compose.override.yml),)
 COMPOSE_FILES += -f docker-compose.override.yml
@@ -48,6 +56,9 @@ endif
 COMPOSE_FILES_NG := -f $(COMPOSE_BASE)
 ifneq ($(wildcard $(COMPOSE_AGENTS)),)
 COMPOSE_FILES_NG += -f $(COMPOSE_AGENTS)
+endif
+ifeq ($(USE_CUDA),true)
+COMPOSE_FILES_NG += -f $(COMPOSE_CUDA)
 endif
 ifneq ($(wildcard docker-compose.override.yml),)
 COMPOSE_FILES_NG += -f docker-compose.override.yml
