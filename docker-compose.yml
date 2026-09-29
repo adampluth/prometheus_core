@@ -8,6 +8,11 @@ x-common-env: &common-env
   REGISTRY_URL: ${REGISTRY_URL:-http://litellm:4000}
   REDIS_URL: ${REDIS_URL:-redis://redis:6379}
   REDIS_PASSWORD: ${REDIS_PASSWORD}
+  # Lifetime of each conversation's artifact catalog (artifacts:conv:{id}:*). 0 keeps
+  # it as long as the conversation itself (which never expires), so a reopened
+  # conversation can still show its artifacts. Any other value must be set on every
+  # service that registers artifacts -- the per-agent compose files carry it too.
+  ARTIFACT_REGISTRY_TTL_SECONDS: ${ARTIFACT_REGISTRY_TTL_SECONDS:-0}
   DEEPLYNX_BASE_URL: ${DEEPLYNX_BASE_URL:-https://deeplynx.inl.gov/api/v1}
   DEEPLYNX_KEY: ${DEEPLYNX_KEY:-}
   DEEPLYNX_SECRET: ${DEEPLYNX_SECRET:-}
