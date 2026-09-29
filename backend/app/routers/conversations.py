@@ -33,12 +33,14 @@ from app.config import settings
 from app.contract import (
     ConversationDetailResponse,
     ConversationHistoryResponse,
+    ConversationMessage,
     ConversationRenameRequest,
     ConversationSummary,
 )
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import shape_artifacts
+from app.services.mesh.service import enrich_mesh_artifact_list
 from app.sessions import SessionState, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -91,30 +93,31 @@ async def get_recent_conversations(
     )
 
 
-def _build_detail(client: ConversationStateClient, conv_id: str) -> ConversationDetailResponse:
-    """Assemble the detail/resume response from the raw store (caller has already
-    checked ownership)."""
+def _build_detail(client: ConversationStateClient, conv_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
+    """Assemble the detail/resume response (without artifacts) and the raw artifact
+    catalog from the store (caller has already checked ownership)."""
     conv = client.get_conversation(conv_id) or {}
     meta = client.get_meta(conv_id)
     title = meta.get("title_override") or conv.get("title") or conv.get("user_query", "")
     messages = client.get_transcript(conv_id)
-    raw_artifacts = client.get_artifacts(conv_id)
-    return ConversationDetailResponse(
+    detail = ConversationDetailResponse(
         conversation_id=conv_id,
         title=title,
         profile=str(conv.get("profile") or ""),
-        messages=[{"role": m["role"], "content": m["content"], "timestamp": m["timestamp"]} for m in messages],
-        artifacts=shape_artifacts(raw_artifacts),
+        messages=[
+            ConversationMessage(role=m["role"], content=m["content"], timestamp=m["timestamp"]) for m in messages
+        ],
     )
+    return detail, client.get_artifacts(conv_id)
 
 
 def _fetch_detail(conv_id: str, user_id: str) -> tuple[bool, Any]:
     """Blocking ownership check + detail assembly, run in a worker thread.
 
-    Returns ``(found, detail_or_none)``: ``found`` is ``False`` when Redis is down,
-    the conversation doesn't exist, or it isn't owned by *user_id* — the caller maps
-    that uniformly to 404 so a non-owner can't distinguish "doesn't exist" from "not
-    yours".
+    Returns ``(found, (detail, raw_artifacts) or None)``: ``found`` is ``False`` when
+    Redis is down, the conversation doesn't exist, or it isn't owned by *user_id* —
+    the caller maps that uniformly to 404 so a non-owner can't distinguish "doesn't
+    exist" from "not yours".
     """
     client = _client()
     if not client.available or not client.owns(user_id, conv_id):
@@ -122,15 +125,31 @@ def _fetch_detail(conv_id: str, user_id: str) -> tuple[bool, Any]:
     return True, _build_detail(client, conv_id)
 
 
+async def _load_detail(conv_id: str, user_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
+    """Fetch a conversation the caller owns (404 otherwise) with its artifacts shaped.
+
+    The stored catalog never carries the mesh viewer's ``json_body`` (a live turn
+    adds it in ``handle_turn``), so it is re-derived here — otherwise a reopened
+    conversation's meshes would render as plain downloads. The conversion cache
+    makes this cheap after the first time. Returns the raw (enriched) catalog too,
+    for resume to put on the session.
+    """
+    found, loaded = await asyncio.to_thread(_fetch_detail, conv_id, user_id)
+    if not found:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    detail, raw_artifacts = cast(tuple[ConversationDetailResponse, list[dict]], loaded)
+    await enrich_mesh_artifact_list(raw_artifacts)
+    detail.artifacts = shape_artifacts(raw_artifacts)
+    return detail, raw_artifacts
+
+
 @router.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
 async def get_conversation_detail(
     conversation_id: str,
     claims: TokenClaims = Depends(current_claims),
 ) -> ConversationDetailResponse:
-    found, detail = await asyncio.to_thread(_fetch_detail, conversation_id, claims.sub)
-    if not found:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    return cast(ConversationDetailResponse, detail)
+    detail, _ = await _load_detail(conversation_id, claims.sub)
+    return detail
 
 
 def _rename(conv_id: str, user_id: str, title: str) -> bool:
@@ -183,15 +202,12 @@ async def resume_conversation(
     """Rebind the caller's session to a past conversation so the next chat turn
     continues it. Returns its transcript + artifact catalog in the same call so
     the frontend can render history and resume in one round-trip."""
-    found, detail = await asyncio.to_thread(_fetch_detail, conversation_id, claims.sub)
-    if not found:
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
-    detail = cast(ConversationDetailResponse, detail)
+    detail, raw_artifacts = await _load_detail(conversation_id, claims.sub)
 
     store = _get_store(request)
     session: SessionState = store.get_or_create(claims.sid)
     session.conversation_id = conversation_id
-    session.artifacts = await asyncio.to_thread(_client().get_artifacts, conversation_id)
+    session.artifacts = raw_artifacts
     session.awaited_task_ids = set()
     session.consecutive_needs_info = 0
 

@@ -171,14 +171,23 @@ async def enrich_mesh_artifacts(response: "ConversationResponse") -> None:
 
     Enriches across the union of ``new_artifacts`` (shaped for the wire) and
     ``artifacts`` (the persisted catalog), deduped by identity so each dataset is
-    converted once; the content-hash cache also makes any repeat (e.g. history
-    re-render) free. Failures are swallowed — the artifact keeps ``json_body: None``.
+    converted once.
     """
-    all_artifacts: list[dict[str, Any]] = [
-        a
-        for a in (list(getattr(response, "new_artifacts", None) or []) + list(getattr(response, "artifacts", None) or []))
-        if isinstance(a, dict)
-    ]
+    await enrich_mesh_artifact_list(
+        list(getattr(response, "new_artifacts", None) or []) + list(getattr(response, "artifacts", None) or [])
+    )
+
+
+async def enrich_mesh_artifact_list(artifacts: list[Any]) -> None:
+    """Populate ``json_body`` for every mesh artifact dict in *artifacts*, in place.
+
+    Used for live turns (via :func:`enrich_mesh_artifacts`) and for reopening a
+    past conversation, whose Redis catalog never carries ``json_body``. Artifacts
+    sharing an identity are converted once, and the content-hash cache makes a
+    repeat (e.g. reopening the same conversation) free. Failures are swallowed —
+    the artifact keeps ``json_body: None``.
+    """
+    all_artifacts: list[dict[str, Any]] = [a for a in artifacts if isinstance(a, dict)]
     if not all_artifacts:
         return
 
