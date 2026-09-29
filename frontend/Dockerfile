@@ -7,8 +7,13 @@ WORKDIR /app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=certs ca-bundle.pem /usr/local/share/ca-certificates/ca-bundle.crt
-RUN update-ca-certificates
+# update-ca-certificates only picks up *.crt files, so normalize the extension
+COPY --from=certs . /tmp/certs/
+RUN for f in /tmp/certs/*.pem /tmp/certs/*.crt; do \
+      [ -e "$f" ] && cp "$f" "/usr/local/share/ca-certificates/$(basename "${f%.*}").crt"; \
+    done; \
+    update-ca-certificates \
+ && rm -rf /tmp/certs
 
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt \
     NPM_CONFIG_cafile=/etc/ssl/certs/ca-certificates.crt
