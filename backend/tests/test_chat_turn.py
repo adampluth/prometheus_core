@@ -41,7 +41,7 @@ def test_map_completed_shapes_artifacts_and_persists_catalog():
         message_metadata={"follow_up_suggestions": ["Do X", "Do Y"]},
     )
 
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
 
     assert mapped.status == ChatStatus.COMPLETED.value
     assert mapped.turn_id == "t1"
@@ -62,7 +62,7 @@ def test_map_completed_slash_command_suppresses_artifacts():
         new_artifacts=[{"artifact_id": "a1", "name": "x"}],
         message_metadata={"slash_command": True},
     )
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
     assert mapped.artifacts is None
 
 
@@ -72,7 +72,7 @@ def test_map_completed_falls_back_to_artifact_count_text():
         status="completed",
         new_artifacts=[{"artifact_id": "a1", "name": "x", "mime_type": "application/json"}],
     )
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
     assert mapped.report == "1 artifact(s) ready."
 
 
@@ -92,7 +92,7 @@ def test_map_needs_info_normalizes_questions():
             {"question": "Material?", "type": "select", "options": ["steel", "copper"]},
         ],
     )
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
 
     assert mapped.status == ChatStatus.NEEDS_INFO.value
     assert mapped.followup_questions is not None and len(mapped.followup_questions) == 2
@@ -111,12 +111,12 @@ def test_map_plan_ready_carries_auto_approve():
     session = _session()
     response = _resp(status="plan_ready", message="Proposed plan", plan={"steps": ["a", "b"]})
 
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=True)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=True)
     assert mapped.status == ChatStatus.PLAN_READY.value
     assert mapped.plan == {"steps": ["a", "b"]}
     assert mapped.auto_approve is True
 
-    mapped_off = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped_off = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
     assert mapped_off.auto_approve is False
 
 
@@ -124,7 +124,7 @@ def test_map_backgrounded_registers_awaited_task():
     session = _session()
     response = _resp(status="backgrounded", message_metadata={"task_id": "task-42"})
 
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
     assert mapped.status == ChatStatus.BACKGROUNDED.value
     assert mapped.task_id == "task-42"
     assert "task-42" in session.awaited_task_ids
@@ -145,7 +145,7 @@ def test_map_final_skips_session_mutation_when_stale():
         artifacts=[{"artifact_id": "a1", "name": "full"}],
     )
 
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False, stale=True)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False, stale=True)
 
     # A response is still produced (the original HTTP request needs one)...
     assert mapped.status == ChatStatus.COMPLETED.value
@@ -158,7 +158,7 @@ def test_map_backgrounded_skips_registration_when_stale():
     session = _session()
     response = _resp(status="backgrounded", message_metadata={"task_id": "task-42"})
 
-    chat_service.map_response(response, "t1", session, auto_approve=False, stale=True)
+    chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False, stale=True)
 
     assert session.awaited_task_ids == set()
 
@@ -168,7 +168,7 @@ def test_map_needs_info_depth_cap_not_applied_when_stale():
     session.consecutive_needs_info = 5
     ni = _resp(status="needs_info", message="m", followup_questions=[])
 
-    mapped = chat_service.map_response(ni, "t", session, auto_approve=False, stale=True)
+    mapped = chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False, stale=True)
 
     # Still a needs_info response, not the "too many followups" fallback...
     assert mapped.status == ChatStatus.NEEDS_INFO.value
@@ -184,7 +184,7 @@ def test_map_needs_info_depth_cap_not_applied_when_stale():
 def test_answer_text_only_in_response_text():
     session = _session()
     mapped = chat_service.map_response(
-        _resp(status="answer", response_text="42", message="noise"), "t", session, auto_approve=False
+        _resp(status="answer", response_text="42", message="noise"), "t", session, conversation_id="c1", auto_approve=False
     )
     assert mapped.response_text == "42"
     assert mapped.report is None
@@ -197,7 +197,7 @@ def test_completed_text_only_in_report():
         _resp(status="completed", report="done", response_text="dup", message="noise"),
         "t",
         session,
-        auto_approve=False,
+        conversation_id="c1", auto_approve=False,
     )
     assert mapped.report == "done"
     assert mapped.response_text is None
@@ -214,9 +214,9 @@ def test_needs_info_depth_cap_stops_looping():
     ni = _resp(status="needs_info", followup_questions=[{"field": "f", "question": "Q?"}])
     # The cap allows N consecutive needs_info turns…
     for _ in range(chat_service._MAX_CONSECUTIVE_NEEDS_INFO):
-        assert chat_service.map_response(ni, "t", session, auto_approve=False).status == ChatStatus.NEEDS_INFO.value
+        assert chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False).status == ChatStatus.NEEDS_INFO.value
     # …then stops looping with a plain message instead of another form.
-    capped = chat_service.map_response(ni, "t", session, auto_approve=False)
+    capped = chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
     assert capped.status == ChatStatus.ANSWER.value
     assert capped.followup_questions is None
     assert "restate" in (capped.response_text or "").lower()
@@ -225,17 +225,17 @@ def test_needs_info_depth_cap_stops_looping():
 def test_needs_info_counter_resets_on_other_status():
     session = _session()
     ni = _resp(status="needs_info", followup_questions=[{"field": "f", "question": "Q?"}])
-    chat_service.map_response(ni, "t", session, auto_approve=False)
-    chat_service.map_response(ni, "t", session, auto_approve=False)
+    chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
+    chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
     assert session.consecutive_needs_info == 2
-    chat_service.map_response(_resp(status="answer", response_text="done"), "t", session, auto_approve=False)
+    chat_service.map_response(_resp(status="answer", response_text="done"), "t", session, conversation_id="c1", auto_approve=False)
     assert session.consecutive_needs_info == 0
 
 
 def test_map_backgrounded_without_task_id_registers_nothing():
     session = _session()
     response = _resp(status="backgrounded")
-    mapped = chat_service.map_response(response, "t1", session, auto_approve=False)
+    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
     assert mapped.task_id is None
     assert session.awaited_task_ids == set()
 
@@ -243,16 +243,16 @@ def test_map_backgrounded_without_task_id_registers_nothing():
 def test_map_executing_and_error_and_unknown():
     session = _session()
 
-    executing = chat_service.map_response(_resp(status="executing"), "t", session, auto_approve=False)
+    executing = chat_service.map_response(_resp(status="executing"), "t", session, conversation_id="c1", auto_approve=False)
     assert executing.status == ChatStatus.EXECUTING.value
     assert "executing" in (executing.message or "").lower()
 
-    err = chat_service.map_response(_resp(status="error", message="boom"), "t", session, auto_approve=False)
+    err = chat_service.map_response(_resp(status="error", message="boom"), "t", session, conversation_id="c1", auto_approve=False)
     assert err.status == ChatStatus.ERROR.value
     assert err.message == "boom"
 
     answer = chat_service.map_response(
-        _resp(status="answer", response_text="hi"), "t", session, auto_approve=False
+        _resp(status="answer", response_text="hi"), "t", session, conversation_id="c1", auto_approve=False
     )
     assert answer.status == ChatStatus.ANSWER.value
     assert answer.response_text == "hi"

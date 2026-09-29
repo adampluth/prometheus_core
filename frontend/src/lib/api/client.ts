@@ -166,11 +166,6 @@ export const api = {
     });
   },
 
-  /** URL for an artifact's bytes; used directly as an <img>/<embed> src or fetch target. */
-  artifactContentUrl(artifactId: string): string {
-    return `${API_BASE}/artifacts/${encodeURIComponent(artifactId)}/content`;
-  },
-
   // --- admin: users (require_admin server-side; 403 for non-admins) ---
   listAdminUsers(): Promise<AdminUser[]> {
     return request<AdminUser[]>("/admin/users");

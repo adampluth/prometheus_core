@@ -1,16 +1,22 @@
 """Offline tests for artifact classification + the content proxy (task 07).
 
 The classifier tests exercise ``classify_render_hint`` across json_type / tags /
-mime / extension precedence. The router tests drive ``GET /api/artifacts/{id}/content``
-against a ``TestClient`` with a seeded session catalog and ``uri_resolver`` stubbed —
-no live agent, DeepLynx, or network. The auth/200 cases also prove the router is
-mounted in ``app/main.py``.
+mime / extension precedence. The router tests drive
+``GET /api/conversations/{cid}/artifacts/{aid}/content`` against a ``TestClient`` with
+a fakeredis-seeded conversation catalog and ``uri_resolver`` stubbed — no live agent,
+DeepLynx, or network. The auth/200 cases also prove the router is mounted in
+``app/main.py``.
 """
 
+import json
+
+import fakeredis
 import pytest
 from fastapi.testclient import TestClient
 
 from app import uri_resolver
+from app.conversation_state import ConversationStateClient
+from app.routers import artifacts as artifacts_router
 from app.services.artifacts import (
     artifact_download_payload,
     artifact_identity,
@@ -78,11 +84,17 @@ def test_mime_normalized_with_charset_param():
 
 
 def test_to_artifact_meta_carries_hint_and_skips_conversation_message():
-    meta = to_artifact_meta({"artifact_id": "a1", "name": "r.pdf", "mime_type": "application/pdf"})
+    meta = to_artifact_meta({"artifact_id": "a1", "name": "r.pdf", "mime_type": "application/pdf"}, "c1")
     assert meta is not None and meta.render_hint == "pdf"
 
-    assert to_artifact_meta({"name": "conversation_message"}) is None
-    assert to_artifact_meta({"metadata": {"kind": "conversation_message"}}) is None
+    assert to_artifact_meta({"name": "conversation_message"}, "c1") is None
+    assert to_artifact_meta({"metadata": {"kind": "conversation_message"}}, "c1") is None
+
+
+def test_to_artifact_meta_scopes_content_url_to_conversation():
+    meta = to_artifact_meta({"artifact_id": "a/1", "name": "x.png"}, "c 1")
+    assert meta is not None
+    assert meta.content_url == "/api/conversations/c%201/artifacts/a%2F1/content"
 
 
 def test_to_artifact_meta_populates_citation_for_reference(monkeypatch):
@@ -92,7 +104,8 @@ def test_to_artifact_meta_populates_citation_for_reference(monkeypatch):
             "artifact_id": "ref1",
             "tags": ["reference"],
             "metadata": {"source": "ASME BPVC", "section": "II-D", "page": 42},
-        }
+        },
+        "c1",
     )
     assert meta is not None and meta.render_hint == "reference"
     assert meta.citation is not None
@@ -102,7 +115,7 @@ def test_to_artifact_meta_populates_citation_for_reference(monkeypatch):
 
 
 def test_to_artifact_meta_citation_absent_when_no_metadata():
-    meta = to_artifact_meta({"artifact_id": "a1", "mime_type": "application/pdf"})
+    meta = to_artifact_meta({"artifact_id": "a1", "mime_type": "application/pdf"}, "c1")
     assert meta is not None and meta.citation is None
 
 
@@ -127,12 +140,17 @@ def test_download_payload_none_when_nothing_inline():
 
 
 # --------------------------------------------------------------------------- #
-# GET /api/artifacts/{id}/content
+# GET /api/conversations/{cid}/artifacts/{aid}/content
 # --------------------------------------------------------------------------- #
 
 
-def _authed_client(monkeypatch, artifacts=None) -> TestClient:
-    """TestClient with a valid cookie and a seeded session artifact catalog."""
+def _authed_client(monkeypatch, artifacts=None, *, owner: str = "alice") -> TestClient:
+    """TestClient with a valid cookie and a Redis catalog for conversation ``c1``.
+
+    The catalog is seeded the way ``ArtifactRegistry`` writes it — one hash field per
+    ``artifact_id`` — except id-less artifacts, which land under an unrelated field
+    so the lookup has to fall back to matching their synthetic identity.
+    """
     from app import security
     from app.config import settings
     from app.main import app
@@ -141,16 +159,25 @@ def _authed_client(monkeypatch, artifacts=None) -> TestClient:
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
 
-    store = SessionStore()
-    session = store.get_or_create("sid-artifact")
-    session.conversation_id = "c1"
-    session.artifacts = artifacts or []
-    app.state.session_store = store
+    fake = fakeredis.FakeRedis(decode_responses=True)
+    fake.sadd(f"user:convs:{owner}", "c1")
+    for i, artifact in enumerate(artifacts or []):
+        field = artifact.get("artifact_id") or f"legacy-{i}"
+        fake.hset("artifacts:conv:c1:by_id", field, json.dumps(artifact))
+    state = ConversationStateClient("redis://unused")
+    state._client = fake
+    monkeypatch.setattr(artifacts_router, "_client", lambda: state)
 
+    # A fresh session with an empty catalog: content must not depend on it.
+    app.state.session_store = SessionStore()
     token = security.issue_token(security.User(identifier="alice"), sid="sid-artifact")
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
     return client
+
+
+def _url(artifact_id: str, conversation_id: str = "c1") -> str:
+    return f"/api/conversations/{conversation_id}/artifacts/{artifact_id}/content"
 
 
 def test_content_requires_auth():
@@ -159,13 +186,13 @@ def test_content_requires_auth():
 
     app.state.session_store = SessionStore()
     client = TestClient(app)
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 401
 
 
 def test_content_404_when_not_in_catalog(monkeypatch):
     client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "other"}])
-    resp = client.get("/api/artifacts/missing/content")
+    resp = client.get(_url("missing"))
     assert resp.status_code == 404
 
 
@@ -174,7 +201,7 @@ def test_content_streams_inline_json_body(monkeypatch):
         monkeypatch,
         artifacts=[{"artifact_id": "a1", "name": "result", "json_body": {"answer": 42}}],
     )
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/json")
     assert resp.json() == {"answer": 42}
@@ -188,10 +215,31 @@ def test_content_streams_file_uri(monkeypatch, tmp_path):
         monkeypatch,
         artifacts=[{"artifact_id": "a1", "name": "doc.pdf", "mime_type": "application/pdf", "uri": f"file://{f}"}],
     )
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("application/pdf")
     assert resp.content == b"%PDF-1.4 fake"
+    assert "immutable" in resp.headers["cache-control"]
+
+
+def test_content_404_for_conversation_owned_by_someone_else(monkeypatch):
+    client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "a1", "json_body": {}}], owner="bob")
+    assert client.get(_url("a1")).status_code == 404
+
+
+def test_content_allowed_for_session_bound_conversation_without_ownership(monkeypatch):
+    # No identity keys → the client-agent never records ownership; the live chat's
+    # own (server-minted) conversation must still serve its artifacts.
+    from app.main import app
+
+    client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "a1", "json_body": {"k": 1}}], owner="nobody")
+    app.state.session_store.get_or_create("sid-artifact").conversation_id = "c1"
+    assert client.get(_url("a1")).json() == {"k": 1}
+
+
+def test_content_404_for_other_conversation(monkeypatch):
+    client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "a1", "json_body": {}}])
+    assert client.get(_url("a1", conversation_id="c2")).status_code == 404
 
 
 def test_content_502_when_resolve_fails(monkeypatch):
@@ -203,13 +251,13 @@ def test_content_502_when_resolve_fails(monkeypatch):
         monkeypatch,
         artifacts=[{"artifact_id": "a1", "name": "x", "uri": "deeplynx://org/items/1"}],
     )
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 502
 
 
 def test_content_404_when_in_catalog_but_no_content(monkeypatch):
     client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "a1", "name": "empty"}])
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 404
 
 
@@ -230,7 +278,7 @@ def test_artifact_identity_is_stable_distinct_and_prefers_explicit():
 def test_content_fetches_idless_inline_artifact(monkeypatch):
     art = {"name": "notes", "json_body": {"k": "v"}}  # no artifact_id/id
     client = _authed_client(monkeypatch, artifacts=[art])
-    resp = client.get(f"/api/artifacts/{artifact_identity(art)}/content")
+    resp = client.get(_url(artifact_identity(art)))
     assert resp.status_code == 200
     assert resp.json() == {"k": "v"}
 
@@ -247,7 +295,7 @@ def test_content_disposition_is_attachment_for_download(monkeypatch, tmp_path):
         monkeypatch,
         artifacts=[{"artifact_id": "a1", "name": "logs.zip", "mime_type": "application/zip", "uri": f"file://{f}"}],
     )
-    resp = client.get("/api/artifacts/a1/content")
+    resp = client.get(_url("a1"))
     assert resp.status_code == 200
     assert resp.headers["content-disposition"].startswith("attachment;")
 
@@ -255,7 +303,7 @@ def test_content_disposition_is_attachment_for_download(monkeypatch, tmp_path):
 def test_content_disposition_escapes_dangerous_filename(monkeypatch):
     art = {"artifact_id": "a1", "name": 'ev"il\nname', "json_body": {"k": 1}}
     client = _authed_client(monkeypatch, artifacts=[art])
-    cd = client.get("/api/artifacts/a1/content").headers["content-disposition"]
+    cd = client.get(_url("a1")).headers["content-disposition"]
     assert "\n" not in cd and "\r" not in cd  # no header injection
     # quote + newline stripped from the ascii name (.json appended for the inline body)
     assert 'filename="evilname.json"' in cd

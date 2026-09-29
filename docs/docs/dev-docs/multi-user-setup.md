@@ -329,10 +329,13 @@ This is intentional, not an oversight. The actual data-access boundary is
 (see Credential broker below), so a user can never reach another user's
 *source* artifact regardless of how the local rendering cache is laid out —
 namespacing the local VTP cache by user would only protect a cache of content
-the requester could already fetch on their own. `GET /api/artifacts/{id}/content`
-(the non-mesh artifact endpoint) is separately — and more strongly — isolated:
-it resolves against `session.artifacts`, so it can only ever address the
-calling session's own catalog.
+the requester could already fetch on their own.
+`GET /api/conversations/{cid}/artifacts/{aid}/content` (the non-mesh artifact
+endpoint) is separately — and more strongly — isolated: it first checks that the
+caller owns `cid` (`user:convs:{user}`, or has a session currently bound to it —
+only ever a server-minted id or an ownership-checked resume) and then resolves
+`aid` only within that conversation's catalog, so it can only ever address the
+caller's own artifacts.
 
 If this changes (e.g. mesh conversion moves to per-user DeepLynx-backed
 storage rather than a local disk cache), revisit this section before assuming

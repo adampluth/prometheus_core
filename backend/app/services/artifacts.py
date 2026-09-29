@@ -3,6 +3,10 @@
 The turn orchestrator (task 04) calls :func:`to_artifact_meta` to shape each raw
 catalog dict from ``ConversationResponse`` into the frozen :class:`ArtifactMeta`
 wire shape, and :func:`shape_artifacts` to build the list for a completed turn.
+Both are conversation-scoped: every shaped artifact carries a ``content_url`` under
+``/api/conversations/{id}/artifacts/{artifact_id}``, so the frontend fetches by
+(conversation, artifact) from the Redis catalog rather than from whatever the
+caller's session happens to be bound to.
 
 :func:`classify_render_hint` derives the frontend viewer hint. It combines the
 intent of the two Chainlit classifiers — the plugin dispatch order in
@@ -27,6 +31,8 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, Optional
+
+from urllib.parse import quote
 
 from app.contract import ArtifactMeta, Citation, RenderHint
 
@@ -151,9 +157,8 @@ def artifact_identity(artifact: dict[str, Any]) -> str:
 
     Prefers the explicit ``artifact_id`` / ``id``. When neither is present (id-less
     inline artifacts), derives a deterministic synthetic id from the artifact's
-    distinguishing fields so it is still routable via
-    ``GET /api/artifacts/{id}/content`` and doesn't collide with other id-less
-    artifacts. Both :func:`to_artifact_meta` (wire) and the content route's catalog
+    distinguishing fields so it is still routable via the content route and doesn't
+    collide with other id-less artifacts. Both :func:`to_artifact_meta` (wire) and the content route's catalog
     lookup call this, so the frontend's id round-trips to the same raw dict.
     """
     explicit = str(artifact.get("artifact_id") or artifact.get("id") or "")
@@ -283,7 +288,12 @@ def _citation_from(metadata: dict[str, Any]) -> Optional[Citation]:
     )
 
 
-def to_artifact_meta(artifact: dict[str, Any]) -> Optional[ArtifactMeta]:
+def artifact_base_url(conversation_id: str, artifact_id: str) -> str:
+    """``/api/conversations/{cid}/artifacts/{aid}`` — root of an artifact's routes."""
+    return f"/api/conversations/{quote(conversation_id, safe='')}/artifacts/{quote(artifact_id, safe='')}"
+
+
+def to_artifact_meta(artifact: dict[str, Any], conversation_id: str) -> Optional[ArtifactMeta]:
     """Map one raw catalog dict to :class:`ArtifactMeta`, or ``None`` to skip it.
 
     Returns ``None`` for ``conversation_message`` records (not user-facing) and
@@ -296,8 +306,11 @@ def to_artifact_meta(artifact: dict[str, Any]) -> Optional[ArtifactMeta]:
 
     metadata = artifact.get("metadata") or {}
     tags = artifact.get("tags")
+    artifact_id = artifact_identity(artifact)
+    render_hint = classify_render_hint(artifact)
+    base_url = artifact_base_url(conversation_id, artifact_id)
     return ArtifactMeta(
-        artifact_id=artifact_identity(artifact),
+        artifact_id=artifact_id,
         name=str(artifact.get("name") or ""),
         mime_type=artifact.get("mime_type"),
         json_type=artifact.get("json_type") or metadata.get("json_type"),
@@ -305,18 +318,19 @@ def to_artifact_meta(artifact: dict[str, Any]) -> Optional[ArtifactMeta]:
         uri=artifact.get("uri"),
         tags=list(tags) if isinstance(tags, list) else [],
         json_body=artifact.get("json_body"),
-        render_hint=classify_render_hint(artifact),
+        render_hint=render_hint,
+        content_url=f"{base_url}/content",
         citation=_citation_from(metadata),
         producer_agent_id=artifact.get("producer_agent_id"),
         created_at=artifact.get("created_at"),
     )
 
 
-def shape_artifacts(artifacts: list[dict[str, Any]]) -> list[ArtifactMeta]:
+def shape_artifacts(artifacts: list[dict[str, Any]], conversation_id: str) -> list[ArtifactMeta]:
     """Shape a list of raw catalog dicts, dropping skipped/invalid entries."""
     shaped: list[ArtifactMeta] = []
     for artifact in artifacts:
-        meta = to_artifact_meta(artifact)
+        meta = to_artifact_meta(artifact, conversation_id)
         if meta is not None:
             shaped.append(meta)
     return shaped

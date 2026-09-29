@@ -166,7 +166,8 @@ async def _announce_completion(
             )
             return
 
-        result = await task_events.fetch_result(redis_url, session.conversation_id or "", task_id)
+        conversation_id = session.conversation_id or ""
+        result = await task_events.fetch_result(redis_url, conversation_id, task_id)
         response = None
         if result:
             # Reuse the turn mapper; the task id doubles as the turn id for this event.
@@ -174,6 +175,7 @@ async def _announce_completion(
                 response_from_payload(result),
                 task_id,
                 session,
+                conversation_id=conversation_id,
                 auto_approve=auto_approve,
             )
         await bus.publish(

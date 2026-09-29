@@ -107,17 +107,20 @@ def _map_final(
     status: ChatStatus,
     session: SessionState,
     *,
+    conversation_id: str,
     stale: bool = False,
 ) -> ChatMessageResponse:
     """Terminal branch (ports ``_handle_final_response``, minus rendering).
 
     - Filters ``new_artifacts``, dropping user-uploaded echoes
       (``metadata.source == "user-upload"``; message_handler.py:672).
-    - Persists the full ``response.artifacts`` catalog onto the session so task 07's
-      ``GET /api/artifacts/{id}/content`` can resolve ids for the whole
-      conversation, not just this turn.
+    - Persists the full ``response.artifacts`` catalog onto the session, which the
+      next turn hands back to the client-agent. (Content fetches don't read it —
+      they resolve from the conversation's Redis catalog; see ``routers/artifacts``.)
     - Pulls ``follow_up_suggestions`` from ``message_metadata``.
-    - Shapes artifacts via task 07's metadata builder (no rendering).
+    - Shapes artifacts via task 07's metadata builder (no rendering), scoped to
+      ``conversation_id`` — the conversation this turn was *for*, which differs from
+      ``session.conversation_id`` when ``stale``.
 
     ``stale`` is ``True`` when the session has been rebound to a different
     conversation (a "New chat" or a chat-history resume) since this turn was
@@ -138,13 +141,13 @@ def _map_final(
         if (artifact.get("metadata") or {}).get("source") != "user-upload"
     ]
 
-    # Persist the full conversation catalog for later content fetches (task 07).
+    # Persist the full conversation catalog for the next turn's request.
     # Truthy, not ``is not None`` (T-7): an ``artifacts=[]`` turn must not wipe the
-    # accumulated catalog that later ``GET /api/artifacts/{id}/content`` calls resolve.
+    # accumulated catalog.
     if response.artifacts and not stale:
         session.artifacts = response.artifacts
 
-    shaped = shape_artifacts(new_artifacts)
+    shaped = shape_artifacts(new_artifacts, conversation_id)
     text = _coerce_final_text(response, len(shaped)) or None
 
     suggestions = metadata.get("follow_up_suggestions") or None
@@ -209,6 +212,7 @@ def map_response(
     turn_id: str,
     session: SessionState,
     *,
+    conversation_id: str,
     auto_approve: bool,
     stale: bool = False,
 ) -> ChatMessageResponse:
@@ -224,6 +228,9 @@ def map_response(
     mutation below is skipped in that case, though a response is still returned
     (the caller's HTTP request still needs one; the frontend discards it as
     stale independently — see ``lib/store/chat.ts``'s ``post()``).
+
+    ``conversation_id`` is the conversation the response belongs to; artifact
+    URLs are scoped to it.
     """
     status = response.status  # str, because ConversationResponse uses use_enum_values
 
@@ -251,7 +258,9 @@ def map_response(
     if status == "plan_ready":
         return _map_plan_ready(response, turn_id, auto_approve=auto_approve)
     if status in ("completed", "answer", "recommendation"):
-        return _map_final(response, turn_id, ChatStatus(status), session, stale=stale)
+        return _map_final(
+            response, turn_id, ChatStatus(status), session, conversation_id=conversation_id, stale=stale
+        )
     if status == "backgrounded":
         return _map_backgrounded(response, turn_id, session, stale=stale)
     if status == "executing":
@@ -336,7 +345,9 @@ async def handle_turn(
     await enrich_mesh_artifacts(response)
 
     stale = session.conversation_id != conversation_id
-    return map_response(response, turn_id, session, auto_approve=auto_approve, stale=stale)
+    return map_response(
+        response, turn_id, session, conversation_id=conversation_id, auto_approve=auto_approve, stale=stale
+    )
 
 
 def upload_descriptors_to_dicts(

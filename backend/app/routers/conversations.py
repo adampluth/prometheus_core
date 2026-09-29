@@ -139,7 +139,7 @@ async def _load_detail(conv_id: str, user_id: str) -> tuple[ConversationDetailRe
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     detail, raw_artifacts = cast(tuple[ConversationDetailResponse, list[dict]], loaded)
     await enrich_mesh_artifact_list(raw_artifacts)
-    detail.artifacts = shape_artifacts(raw_artifacts)
+    detail.artifacts = shape_artifacts(raw_artifacts, conv_id)
     return detail, raw_artifacts
 
 

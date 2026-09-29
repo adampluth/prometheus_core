@@ -77,7 +77,7 @@ def test_map_response_handles_every_status(source_status):
     the unknown-status fallback (which would silently relabel it ``answer``).
     """
     response = _resp(status=source_status, **_STATUS_PAYLOADS[source_status])
-    mapped = chat_service.map_response(response, "turn-1", _session(), auto_approve=False)
+    mapped = chat_service.map_response(response, "turn-1", _session(), conversation_id="c1", auto_approve=False)
 
     assert mapped.turn_id == "turn-1"
     # use_enum_values=True → status is the string value; must equal the source status.
@@ -90,7 +90,7 @@ def test_map_response_handles_every_status(source_status):
 @pytest.mark.parametrize("source_status", ConversationStatus.values())
 def test_map_response_handles_bare_payload(source_status):
     """Even a status-only response (no optional fields) maps without raising."""
-    mapped = chat_service.map_response(_resp(status=source_status), "t", _session(), auto_approve=False)
+    mapped = chat_service.map_response(_resp(status=source_status), "t", _session(), conversation_id="c1", auto_approve=False)
     assert mapped.status == source_status
 
 
@@ -116,7 +116,7 @@ def test_map_response_unknown_status_collapses_to_answer_not_500():
     from types import SimpleNamespace
 
     stub = SimpleNamespace(status="some_future_status", message="hi", response_text="body")
-    mapped = chat_service.map_response(stub, "t", _session(), auto_approve=False)
+    mapped = chat_service.map_response(stub, "t", _session(), conversation_id="c1", auto_approve=False)
     assert mapped.status == ChatStatus.ANSWER.value
     assert mapped.response_text == "body"
 
@@ -161,7 +161,7 @@ _ARTIFACT_MATRIX = [
 )
 def test_to_artifact_meta_render_hint(kind, artifact, expected_hint):
     """``to_artifact_meta`` shapes each artifact kind and derives the right hint."""
-    meta = to_artifact_meta(artifact)
+    meta = to_artifact_meta(artifact, "c1")
     assert meta is not None, f"{kind} artifact should not be dropped"
     assert meta.render_hint == expected_hint
     assert meta.artifact_id == artifact["artifact_id"]

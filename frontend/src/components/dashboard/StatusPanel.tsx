@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Cpu, FolderOpen } from "lucide-react";
-import { api } from "@/lib/api/client";
 import { useChatState } from "@/lib/store/chat";
 import type { ArtifactMeta } from "@/lib/api/types";
 
@@ -36,7 +35,7 @@ function useConversationArtifacts(): ArtifactMeta[] {
 function ArtifactCard({ artifact }: { artifact: ArtifactMeta }) {
   return (
     <a
-      href={api.artifactContentUrl(artifact.artifact_id)}
+      href={artifact.content_url}
       target="_blank"
       rel="noreferrer"
       className="card border border-base-300 bg-base-200 transition-colors hover:border-primary/40 hover:bg-base-300"

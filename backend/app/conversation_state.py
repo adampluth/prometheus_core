@@ -19,6 +19,8 @@ try:
 except ImportError:  # pragma: no cover - only when redis is absent
     redis = None  # type: ignore
 
+from app.services.artifacts import artifact_identity
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -135,6 +137,32 @@ class ConversationStateClient:
             if isinstance(parsed, dict):
                 artifacts.append(parsed)
         return artifacts
+
+    def get_artifact(self, conv_id: str, artifact_id: str) -> Optional[Dict[str, Any]]:
+        """One raw catalog dict by id, or ``None``.
+
+        Catalog entries are keyed by their ``artifact_id``, so this is a single
+        ``HGET``; an id-less artifact's synthetic id (``artifact_identity``) isn't a
+        hash key, so a miss falls back to scanning the catalog for it.
+        """
+        client = self.client
+        if client is None or not artifact_id:
+            return None
+        try:
+            value = client.hget(f"artifacts:conv:{conv_id}:by_id", artifact_id)
+        except Exception:
+            return None
+        if value:
+            try:
+                parsed = json.loads(value)
+            except (TypeError, ValueError):
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+        for artifact in self.get_artifacts(conv_id):
+            if artifact_identity(artifact) == artifact_id:
+                return artifact
+        return None
 
     # --------------------------------------------------------------------- #
     # Per-user metadata (title override / soft delete) — ``conv:meta:{id}``

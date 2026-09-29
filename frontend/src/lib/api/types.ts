@@ -82,6 +82,9 @@ export interface ArtifactMeta {
   tags: string[];
   json_body?: unknown;
   render_hint: RenderHint;
+  /** Bytes for this artifact (`/api/conversations/{id}/artifacts/{aid}/content`);
+   * used directly as an <img>/<embed> src or fetch target. */
+  content_url: string;
   citation?: Citation | null;
   producer_agent_id?: string | null;
   created_at?: string | null;

@@ -6,7 +6,7 @@
  * URL resolution
  * ──────────────
  * The artifact adapter (artifactAdapter.ts) sets `element.url` to the content
- * proxy `GET /api/artifacts/{id}/content`, which streams the PDF bytes inline.
+ * proxy `content_url` (`GET /api/conversations/{id}/artifacts/{aid}/content`), which streams the PDF bytes inline.
  */
 
 import { FileDown } from "lucide-react";

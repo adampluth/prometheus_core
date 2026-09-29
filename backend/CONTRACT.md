@@ -185,6 +185,7 @@ One model covers every `status`; only the status-relevant fields are populated.
       "tags": ["mesh", "thermal"],
       "json_body": null,
       "render_hint": "mesh",
+      "content_url": "/api/conversations/c-8f2a…/artifacts/art-9/content",
       "producer_agent_id": "thermal-agent",
       "created_at": "2026-08-10T12:00:00Z"
     }
@@ -255,6 +256,7 @@ For `reference` artifacts, `ArtifactMeta.citation` carries `{source, section, pa
   "uri": "https://…",
   "tags": ["reference"],
   "render_hint": "reference",
+  "content_url": "/api/conversations/c-8f2a…/artifacts/ref-3/content",
   "citation": { "source": "ASME BPVC", "section": "II-D", "page": "42" }
 }
 ```
@@ -304,12 +306,24 @@ data: {"type":"task_done","task_id":"bg-43","state":"failed","message":"Backgrou
 
 ---
 
-## `GET /api/artifacts/{artifact_id}/content`
+## `GET /api/conversations/{conversation_id}/artifacts/{artifact_id}/content`
 
 Resolves `deeplynx://` / remote URIs and streams the artifact bytes with the
 correct `Content-Type` (task 07). Replaces the frontend's old
 `_render_pdf_artifact` / `_render_remote_file_artifact` / `_render_download_artifact`
 download paths.
+
+Every `ArtifactMeta` carries this route as `content_url`; the frontend uses it
+verbatim and never builds artifact URLs itself. The artifact is looked up in the
+conversation's Redis catalog (`artifacts:conv:{id}:by_id`) after an ownership
+check (`user:convs:{user}`, or the caller's session being bound to that
+conversation, for deployments without identity keys), **not** in the caller's
+in-memory session catalog — so it
+keeps working across backend restarts, multiple tabs, "New chat", and reopening
+a past conversation. **404** when the caller doesn't own the conversation or the
+id isn't in its catalog (same non-disclosure rule as the history routes). Artifact
+ids name immutable content, so responses carry
+`Cache-Control: private, max-age=604800, immutable`.
 
 ## Chat history
 

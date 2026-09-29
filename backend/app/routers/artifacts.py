@@ -1,11 +1,20 @@
-"""GET /api/artifacts/{artifact_id}/content — resolve + stream artifact bytes (D3).
+"""GET /api/conversations/{cid}/artifacts/{aid}/content — resolve + stream bytes (D3).
 
-Auth-required. Looks the id up in the session's artifact catalog (populated by the
-turn orchestrator, task 04), resolves its URI to local bytes via
+Auth-required and conversation-scoped. Checks the caller may read the conversation
+(owns it, or their session is bound to it — see :func:`find_owned_artifact`; 404 —
+not 403 — on a miss, like the history routes), looks
+the artifact up in that conversation's Redis catalog (``artifacts:conv:{id}:by_id``,
+written by the agents' ``ArtifactRegistry``), resolves its URI to local bytes via
 ``uri_resolver.resolve_to_local_path`` (``file://`` / ``http(s)://`` / ``deeplynx://``),
 and streams the file with the correct ``Content-Type`` and an ``inline`` disposition.
 For inline-only artifacts (``json_body`` / text, no URI) it serializes the content
 via :func:`app.services.artifacts.artifact_download_payload`.
+
+The lookup deliberately does **not** go through the in-memory session: the session
+is keyed by the cookie's ``sid``, shared by every tab, rebound by "New chat" and
+resume, and gone after a backend restart — none of which should change whether an
+artifact the user owns is fetchable. (``ArtifactMeta.content_url`` carries the
+route, so the frontend never builds it.)
 
 Consolidates Chainlit's ``_render_pdf_artifact`` / ``_render_remote_file_artifact`` /
 ``_render_file_artifact`` / ``_render_download_artifact`` into one endpoint; the React
@@ -14,6 +23,7 @@ viewers fetch bytes from here instead of the server building elements (task 07).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import mimetypes
 import re
@@ -28,14 +38,21 @@ from fastapi.responses import FileResponse, Response
 from starlette.background import BackgroundTask
 
 from app import uri_resolver
+from app.config import settings
+from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
-from app.services.artifacts import artifact_download_payload, artifact_identity, classify_render_hint
+from app.services.artifacts import artifact_download_payload, classify_render_hint
 from app.services.mesh.service import mesh_cache_root
-from app.sessions import SessionState, SessionStore
+from app.sessions import SessionStore
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
+
+# An artifact id names immutable content (registry UUID, or a content hash for id-less
+# artifacts), so the browser may keep it: reopening a conversation re-renders its
+# images/PDFs without re-downloading them from DeepLynx through us.
+_CACHE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 
 # Render hints served as a browser download rather than viewed inline.
 _DOWNLOAD_HINTS = {"file", "unknown"}
@@ -45,22 +62,51 @@ _DOWNLOAD_HINTS = {"file", "unknown"}
 _MESH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def _get_store(request: Request) -> SessionStore:
-    return cast(SessionStore, request.app.state.session_store)
+# One client reused across requests (see routers/conversations.py for the rationale).
+_client_cache: dict = {}
 
 
-def _find_artifact(session: SessionState, artifact_id: str) -> Optional[dict[str, Any]]:
-    """Locate an artifact in the session catalog by its identity (A-4).
+def _client() -> ConversationStateClient:
+    cls = ConversationStateClient
+    inst = _client_cache.get(cls)
+    if inst is None:
+        inst = cls(settings.redis_url)
+        _client_cache[cls] = inst
+    return inst
 
-    Uses the same :func:`artifact_identity` the wire ``ArtifactMeta`` was built with,
-    so a synthetic id minted for an id-less artifact still round-trips to its raw dict
-    (and an empty id can never match the first id-less entry)."""
-    for artifact in session.artifacts:
-        if not isinstance(artifact, dict):
-            continue
-        if artifact_identity(artifact) == artifact_id:
-            return artifact
-    return None
+
+def _lookup(conversation_id: str, artifact_id: str, user_id: str, bound: bool) -> Optional[dict[str, Any]]:
+    """Blocking ownership check + catalog read, run in a worker thread.
+
+    ``None`` when Redis is down, the caller may not read the conversation, or the
+    artifact isn't in its catalog — all mapped to one 404 so a non-owner can't
+    probe which ids exist.
+    """
+    client = _client()
+    if not client.available:
+        return None
+    if not bound and not client.owns(user_id, conversation_id):
+        return None
+    return client.get_artifact(conversation_id, artifact_id)
+
+
+async def find_owned_artifact(
+    conversation_id: str, artifact_id: str, request: Request, claims: TokenClaims
+) -> dict[str, Any]:
+    """The raw catalog dict for an artifact the caller may read, or a 404.
+
+    Readable means the caller owns the conversation (``user:convs:{user}``) **or**
+    their session is currently bound to it. The latter covers deployments without
+    identity signing keys, where the client-agent never learns the user and so never
+    records ownership; it is sound because a session's ``conversation_id`` is only
+    ever server-minted (``POST /api/sessions``) or set by an ownership-checked resume.
+    """
+    session = cast(SessionStore, request.app.state.session_store).get(claims.sid)
+    bound = session is not None and session.conversation_id == conversation_id
+    artifact = await asyncio.to_thread(_lookup, conversation_id, artifact_id, claims.sub, bound)
+    if artifact is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Artifact not found")
+    return artifact
 
 
 def _download_filename(name: str, extension: str) -> str:
@@ -85,21 +131,14 @@ def _content_disposition(filename: str, disposition: str) -> dict[str, str]:
     return {"Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{encoded}"}
 
 
-@router.get("/artifacts/{artifact_id}/content")
+@router.get("/conversations/{conversation_id}/artifacts/{artifact_id}/content")
 async def get_artifact_content(
+    conversation_id: str,
     artifact_id: str,
     request: Request,
     claims: TokenClaims = Depends(current_claims),
 ) -> Response:
-    store = _get_store(request)
-    session = store.get_or_create(claims.sid)
-
-    artifact = _find_artifact(session, artifact_id)
-    if artifact is None:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail=f"Artifact {artifact_id!r} is not in this session's catalog.",
-        )
+    artifact = await find_owned_artifact(conversation_id, artifact_id, request, claims)
 
     name = str(artifact.get("name") or "artifact")
     mime_type = artifact.get("mime_type") or ""
@@ -129,7 +168,10 @@ async def get_artifact_content(
         return FileResponse(
             path=str(local_path),
             media_type=effective_mime,
-            headers=_content_disposition(_download_filename(name, Path(local_path).suffix), disposition),
+            headers={
+                **_CACHE_HEADERS,
+                **_content_disposition(_download_filename(name, Path(local_path).suffix), disposition),
+            },
             background=BackgroundTask(shutil.rmtree, str(cache_dir), ignore_errors=True),
         )
 
@@ -141,7 +183,7 @@ async def get_artifact_content(
         return Response(
             content=content,
             media_type=effective_mime,
-            headers=_content_disposition(filename, disposition),
+            headers={**_CACHE_HEADERS, **_content_disposition(filename, disposition)},
         )
 
     # 3. In catalog but nothing servable.
