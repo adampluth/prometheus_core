@@ -28,7 +28,6 @@ from app.a2a_client import A2AClient, ConversationResponse
 from app.contract import ChatMessageResponse, ChatStatus, UploadDescriptor
 from app.contract import normalize_followup_questions as _normalize_followup_questions
 from app.services.artifacts import shape_artifacts
-from app.services.mesh.service import enrich_mesh_artifacts
 from app.sessions import SessionState
 
 logger = logging.getLogger(__name__)
@@ -336,13 +335,6 @@ async def handle_turn(
         on_status=on_status,
         user_token=user_token,
     )
-
-    # Restore interactive mesh rendering: convert any Exodus/STL artifact to VTP +
-    # manifest and stamp it onto the artifact's json_body (off the event loop, cached)
-    # before shaping, so the frontend adapter mounts the MeshViewer instead of a
-    # download. Never raises — a conversion failure leaves json_body None (graceful
-    # downgrade), so it can't break the turn.
-    await enrich_mesh_artifacts(response)
 
     stale = session.conversation_id != conversation_id
     return map_response(

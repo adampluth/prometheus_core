@@ -1,4 +1,6 @@
-"""GET /api/conversations/{cid}/artifacts/{aid}/content — resolve + stream bytes (D3).
+"""Artifact content, mesh viewer props, and converted mesh files.
+
+``GET /api/conversations/{cid}/artifacts/{aid}/content`` — resolve + stream bytes (D3).
 
 Auth-required and conversation-scoped. Checks the caller may read the conversation
 (owns it, or their session is bound to it — see :func:`find_owned_artifact`; 404 —
@@ -19,6 +21,11 @@ route, so the frontend never builds it.)
 Consolidates Chainlit's ``_render_pdf_artifact`` / ``_render_remote_file_artifact`` /
 ``_render_file_artifact`` / ``_render_download_artifact`` into one endpoint; the React
 viewers fetch bytes from here instead of the server building elements (task 07).
+
+``GET /api/conversations/{cid}/artifacts/{aid}/mesh`` — the MeshViewer props for a
+mesh artifact (same access check), converting it on first request. The viewer calls it
+only once scrolled into view (``ArtifactMeta.mesh_url``). ``GET
+/api/artifacts/mesh/{dataset_id}/{filename}`` then serves the converted ``.vtp`` files.
 """
 
 from __future__ import annotations
@@ -34,7 +41,7 @@ from typing import Any, Optional, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.background import BackgroundTask
 
 from app import uri_resolver
@@ -42,7 +49,8 @@ from app.config import settings
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import artifact_download_payload, classify_render_hint
-from app.services.mesh.service import mesh_cache_root
+from app.services.mesh.exceptions import ConverterError
+from app.services.mesh.service import MeshUnavailable, mesh_cache_root, mesh_viewer_props
 from app.sessions import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -57,7 +65,8 @@ _CACHE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 # Render hints served as a browser download rather than viewed inline.
 _DOWNLOAD_HINTS = {"file", "unknown"}
 
-# One safe path segment (no separators; `..` additionally rejected below). Guards the
+# One safe path segment (no separators; a leading dot additionally rejected below, which
+# also rules out `..` and keeps the cache's `.index/` unreachable). Guards the
 # dataset_id/filename the browser sends to the mesh VTP route.
 _MESH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -193,9 +202,39 @@ async def get_artifact_content(
     )
 
 
+@router.get("/conversations/{conversation_id}/artifacts/{artifact_id}/mesh")
+async def get_artifact_mesh(
+    conversation_id: str,
+    artifact_id: str,
+    request: Request,
+    claims: TokenClaims = Depends(current_claims),
+) -> Response:
+    """MeshViewer props (``manifest``/``baseUrl``/``metadata``/``title``) for a mesh artifact.
+
+    The first request for a source downloads and converts it (seconds to minutes for a
+    large Exodus file); after that it's a disk read (see ``services/mesh/service.py``).
+    Failures return an error the viewer shows next to a download link: 502 when the
+    source can't be fetched, 422 when it isn't a readable mesh, 500 otherwise.
+    """
+    artifact = await find_owned_artifact(conversation_id, artifact_id, request, claims)
+    if classify_render_hint(artifact) != "mesh":
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Artifact is not a mesh.")
+
+    try:
+        props = await mesh_viewer_props(artifact)
+    except MeshUnavailable as exc:
+        raise HTTPException(status_code=http_status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch mesh: {exc}")
+    except ConverterError as exc:
+        raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Could not read mesh: {exc}")
+    except Exception:
+        logger.exception("Mesh conversion failed for artifact %s", artifact_id)
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mesh conversion failed.")
+    return JSONResponse(props, headers=_CACHE_HEADERS)
+
+
 def _reject_unsafe_segment(value: str) -> None:
     """Reject any path segment that isn't a single safe name (path-traversal guard)."""
-    if not _MESH_SEGMENT_RE.match(value) or ".." in value:
+    if not _MESH_SEGMENT_RE.match(value) or value.startswith("."):
         raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Invalid mesh path.")
 
 
@@ -207,12 +246,12 @@ async def get_mesh_file(
 ) -> Response:
     """Serve a converted VTP timestep for the React MeshViewer (auth-required).
 
-    A mesh artifact's ``json_body.baseUrl`` is ``/api/artifacts/mesh/{dataset_id}``
-    (see ``services/mesh/service.py``); the viewer fetches each
-    ``${baseUrl}/${filename}`` from here. ``dataset_id`` is a content hash and the
-    cached files are session-independent, so the guard is auth + path-traversal
-    safety: both segments must be single safe names and the resolved path must stay
-    inside the mesh cache root.
+    The mesh props' ``baseUrl`` is ``/api/artifacts/mesh/{dataset_id}`` (see
+    ``services/mesh/service.py``); the viewer fetches each ``${baseUrl}/${filename}``
+    from here. ``dataset_id`` is a content hash and the cached files are
+    session-independent, so the guard is auth + path-traversal safety: both segments
+    must be single safe names and the resolved path must stay inside the mesh cache
+    root. Content-addressed, hence cacheable forever.
     """
     _reject_unsafe_segment(dataset_id)
     _reject_unsafe_segment(filename)
@@ -224,4 +263,4 @@ async def get_mesh_file(
     if not candidate.is_file():
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Mesh file not found.")
 
-    return FileResponse(path=str(candidate), media_type="application/xml")
+    return FileResponse(path=str(candidate), media_type="application/xml", headers=_CACHE_HEADERS)

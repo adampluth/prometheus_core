@@ -320,6 +320,7 @@ def to_artifact_meta(artifact: dict[str, Any], conversation_id: str) -> Optional
         json_body=artifact.get("json_body"),
         render_hint=render_hint,
         content_url=f"{base_url}/content",
+        mesh_url=f"{base_url}/mesh" if render_hint == "mesh" else None,
         citation=_citation_from(metadata),
         producer_agent_id=artifact.get("producer_agent_id"),
         created_at=artifact.get("created_at"),

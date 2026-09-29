@@ -213,6 +213,8 @@ class ArtifactMeta(BaseModel):
     ``ArtifactReference`` fields the frontend needs, plus the derived
     ``render_hint``. ``json_body`` is inline-only; bytes are fetched from
     ``content_url`` (``GET /api/conversations/{id}/artifacts/{artifact_id}/content``).
+    Mesh artifacts also carry ``mesh_url`` (``…/{artifact_id}/mesh``), which returns
+    the MeshViewer props, converting on first request.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -227,6 +229,7 @@ class ArtifactMeta(BaseModel):
     json_body: Optional[Any] = None  # inline only
     render_hint: RenderHint = "unknown"
     content_url: str = ""
+    mesh_url: Optional[str] = None  # mesh artifacts only
     citation: Optional[Citation] = None  # populated for reference/citation artifacts
     producer_agent_id: Optional[str] = None
     created_at: Optional[str] = None

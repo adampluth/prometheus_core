@@ -186,6 +186,7 @@ One model covers every `status`; only the status-relevant fields are populated.
       "json_body": null,
       "render_hint": "mesh",
       "content_url": "/api/conversations/c-8f2a…/artifacts/art-9/content",
+      "mesh_url": "/api/conversations/c-8f2a…/artifacts/art-9/mesh",
       "producer_agent_id": "thermal-agent",
       "created_at": "2026-08-10T12:00:00Z"
     }
@@ -324,6 +325,37 @@ a past conversation. **404** when the caller doesn't own the conversation or the
 id isn't in its catalog (same non-disclosure rule as the history routes). Artifact
 ids name immutable content, so responses carry
 `Cache-Control: private, max-age=604800, immutable`.
+
+## `GET /api/conversations/{conversation_id}/artifacts/{artifact_id}/mesh`
+
+MeshViewer props for a `render_hint: "mesh"` artifact (Exodus / STL), carried as
+`mesh_url` on its `ArtifactMeta` (`null` for every other kind). Same access check
+and 404 rule as `/content`; also **404** for a non-mesh artifact.
+
+```json
+{
+  "manifest": { "timesteps": [ … ] },
+  "baseUrl": "/api/artifacts/mesh/3f9c…",
+  "metadata": { … },
+  "title": "temperature_field.e"
+}
+```
+
+Nothing is converted up front — not during a turn, not when a conversation is
+reopened. The frontend requests this only once the viewer scrolls into view. The
+first request for a given source downloads and converts it to `.vtp` (can take a
+while for large Exodus files; concurrent requests share one conversion); later
+requests read the persistent conversion cache (`PROMETHEUS_MESH_CACHE_DIR`) without
+touching the source. **502** when the source can't be fetched, **422** when it isn't
+a readable mesh, **500** on any other conversion failure — the viewer shows the
+error with a download link to `content_url`. Cached like `/content`.
+
+## `GET /api/artifacts/mesh/{dataset_id}/{filename}`
+
+The converted `.vtp` timesteps the MeshViewer fetches as `${baseUrl}/${filename}`.
+Auth-required; `dataset_id` is a content hash, so there is no per-conversation
+check. Both segments must be single names not starting with `.`. Immutable and
+cached like `/content`.
 
 ## Chat history
 

@@ -40,7 +40,6 @@ from app.contract import (
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import shape_artifacts
-from app.services.mesh.service import enrich_mesh_artifact_list
 from app.sessions import SessionState, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -128,17 +127,15 @@ def _fetch_detail(conv_id: str, user_id: str) -> tuple[bool, Any]:
 async def _load_detail(conv_id: str, user_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
     """Fetch a conversation the caller owns (404 otherwise) with its artifacts shaped.
 
-    The stored catalog never carries the mesh viewer's ``json_body`` (a live turn
-    adds it in ``handle_turn``), so it is re-derived here — otherwise a reopened
-    conversation's meshes would render as plain downloads. The conversion cache
-    makes this cheap after the first time. Returns the raw (enriched) catalog too,
-    for resume to put on the session.
+    Shaping is metadata only — meshes are converted lazily when their viewer scrolls
+    into view (``ArtifactMeta.mesh_url``), so reopening a conversation is cheap no
+    matter how many meshes it holds. Returns the raw catalog too, for resume to put
+    on the session.
     """
     found, loaded = await asyncio.to_thread(_fetch_detail, conv_id, user_id)
     if not found:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     detail, raw_artifacts = cast(tuple[ConversationDetailResponse, list[dict]], loaded)
-    await enrich_mesh_artifact_list(raw_artifacts)
     detail.artifacts = shape_artifacts(raw_artifacts, conv_id)
     return detail, raw_artifacts
 

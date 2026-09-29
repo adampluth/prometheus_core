@@ -15,12 +15,12 @@
  *   - inline structured data (json/thermal) → props built from `json_body`.
  *   - report/reference → dedicated lightweight viewers (markdown / citation card).
  *
- * Notes on the two gaps carried over from the Chainlit stack:
- *   - **mesh**: the old app rendered Exodus/STL via a Chainlit-side VTK→VTP pipeline
- *     that produced a `baseUrl` + `manifest`. The backend has no such pipeline
- *     (the CONTRACT example ships `json_body: null` for a mesh artifact), so unless a
- *     manifest arrives inline we degrade to a file download rather than mount a viewer
- *     with nothing to show. Restoring interactive mesh rendering is a backend follow-up.
+ * Notes:
+ *   - **mesh**: always a `MeshViewer` custom element. Its props carry `meshUrl` (the
+ *     artifact's `mesh_url`), which the element fetches only once scrolled into view —
+ *     the backend converts Exodus/STL → VTP on that first request and caches it — plus
+ *     `downloadUrl` for the raw file if conversion fails. An inline VTP manifest in
+ *     `json_body`, if an agent ever sends one, is used as-is.
  *   - **mermaid**: no agent currently emits mermaid artifacts, and the diagram source
  *     is not a wire field. We extract it best-effort from `json_body`; an empty source
  *     surfaces the viewer's own "no diagram" state.
@@ -84,19 +84,18 @@ function buildElement(artifact: ArtifactMeta): AnyElement {
         props: { fileUrl: url, filename: artifact.name || "model.ifc" },
       };
 
-    case "mesh": {
-      const manifest = meshManifestProps(artifact.json_body);
-      if (manifest) {
-        return {
-          ...base,
-          type: "custom",
-          name: "MeshViewer",
-          props: { ...manifest, title: artifact.name || "Mesh Viewer" },
-        };
-      }
-      // No inline VTP manifest (see module note) → offer the raw file for download.
-      return { ...base, type: "file", url, props: { description: artifact.description } };
-    }
+    case "mesh":
+      return {
+        ...base,
+        type: "custom",
+        name: "MeshViewer",
+        props: {
+          ...meshManifestProps(artifact.json_body),
+          meshUrl: artifact.mesh_url ?? undefined,
+          downloadUrl: url,
+          title: artifact.name || "Mesh Viewer",
+        },
+      };
 
     case "mermaid":
       return {

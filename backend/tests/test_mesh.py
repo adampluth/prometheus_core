@@ -1,14 +1,16 @@
 """Tests for the mesh (Exodus/STL → VTP) restoration.
 
 Most tests are offline (no VTK): the json_body/prop shape, the source-kind picker,
-the enrichment hook (with the VTK conversion + URI resolver stubbed), and the VTP
+on-demand conversion (``mesh_viewer_props``: source index, in-flight dedupe, failure
+handling — with the VTK conversion + URI resolver stubbed), and the VTP
 route (auth / 404 / path-traversal, serving a pre-seeded cache file). The converter
 round-trip is guarded by ``pytest.importorskip("vtk")`` so it runs only where VTK is
 installed (the container), never breaking the offline suite.
 """
 
+import asyncio
 import json
-import types
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -85,104 +87,128 @@ def test_build_json_body_initial_variable_prefers_point_then_cell_then_none():
 
 
 def _stub_resolver(monkeypatch, tmp_path):
-    """Make resolve_to_local_path return a real (existing) local file."""
+    """Make resolve_to_local_path return a real (existing) local file; count calls."""
     src = tmp_path / "mesh.exo"
     src.write_bytes(b"fake-exodus-bytes")
+    calls = []
 
     async def _resolve(uri, *, cache_dir, artifact=None, artifact_id=None):
+        calls.append(uri)
         return src
 
     monkeypatch.setattr(uri_resolver, "resolve_to_local_path", _resolve)
-    return src
+    return calls
 
 
-async def test_enrich_populates_mesh_json_body(monkeypatch, tmp_path):
-    _stub_resolver(monkeypatch, tmp_path)
-
+def _stub_converter(monkeypatch, dataset_id="dsAAA", *, delay=0.0):
+    """Replace the VTK conversion with one that writes a manifest + meta; count calls."""
     calls = []
 
     def _fake_convert(local_path, cache_root, name, uri, mime):
         calls.append((name, mime))
-        return "dsAAA", _manifest(point=["temperature"]), {"num_timesteps": 1, "time_values": [0.0]}
+        time.sleep(delay)
+        out = cache_root / dataset_id
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "manifest.json").write_text(json.dumps(_manifest(point=["temperature"])))
+        (out / "meta.json").write_text(json.dumps({"num_timesteps": 1, "time_values": [0.0]}))
+        return dataset_id
 
     monkeypatch.setattr(service, "_convert_sync", _fake_convert)
-
-    art = {"artifact_id": "m1", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x/mesh.exo"}
-    response = types.SimpleNamespace(new_artifacts=[art], artifacts=[art])
-
-    await service.enrich_mesh_artifacts(response)
-
-    assert calls  # conversion actually ran
-    assert art["json_body"] is not None
-    assert art["json_body"]["datasetId"] == "dsAAA"
-    assert art["json_body"]["baseUrl"] == "/api/artifacts/mesh/dsAAA"
-    assert art["json_body"]["initialVariable"] == "temperature"
+    return calls
 
 
-async def test_enrich_applies_body_to_all_objects_sharing_identity(monkeypatch, tmp_path):
-    # new_artifacts and the persisted catalog can be distinct dict objects for the same
-    # artifact; both must end up carrying the manifest.
+@pytest.fixture
+def cache_dir(monkeypatch, tmp_path):
+    from app.config import settings
+
+    root = tmp_path / "cache"
+    monkeypatch.setattr(settings, "mesh_cache_dir", str(root), raising=False)
+    return root
+
+
+_MESH = {"artifact_id": "m1", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x/mesh.exo"}
+
+
+async def test_viewer_props_converts_on_first_request(monkeypatch, tmp_path, cache_dir):
     _stub_resolver(monkeypatch, tmp_path)
-    monkeypatch.setattr(
-        service,
-        "_convert_sync",
-        lambda *a: ("ds1", _manifest(), {"num_timesteps": 1, "time_values": [0.0]}),
-    )
+    converts = _stub_converter(monkeypatch)
 
-    new_obj = {"artifact_id": "same", "name": "a.exo", "mime_type": "application/x-exodus", "uri": "file:///a.exo"}
-    cat_obj = {"artifact_id": "same", "name": "a.exo", "mime_type": "application/x-exodus", "uri": "file:///a.exo"}
-    response = types.SimpleNamespace(new_artifacts=[new_obj], artifacts=[cat_obj])
+    props = await service.mesh_viewer_props(dict(_MESH))
 
-    await service.enrich_mesh_artifacts(response)
-
-    assert new_obj["json_body"] is not None
-    assert cat_obj["json_body"] is not None  # distinct object, same identity → enriched
+    assert len(converts) == 1
+    assert props["datasetId"] == "dsAAA"
+    assert props["baseUrl"] == "/api/artifacts/mesh/dsAAA"
+    assert props["initialVariable"] == "temperature"
+    assert props["title"] == "mesh.exo"
 
 
-async def test_enrich_leaves_non_mesh_untouched(monkeypatch, tmp_path):
+async def test_viewer_props_warm_hit_skips_download_and_conversion(monkeypatch, tmp_path, cache_dir):
+    downloads = _stub_resolver(monkeypatch, tmp_path)
+    converts = _stub_converter(monkeypatch)
+    await service.mesh_viewer_props(dict(_MESH))
+
+    props = await service.mesh_viewer_props({**_MESH, "name": "renamed.exo"})
+
+    assert len(downloads) == 1 and len(converts) == 1  # served from the source index
+    assert props["datasetId"] == "dsAAA"
+    assert props["title"] == "renamed.exo"  # title comes from the artifact, not the cache
+
+
+async def test_viewer_props_rebuilds_when_indexed_dataset_is_gone(monkeypatch, tmp_path, cache_dir):
+    import shutil
+
     _stub_resolver(monkeypatch, tmp_path)
+    converts = _stub_converter(monkeypatch)
+    await service.mesh_viewer_props(dict(_MESH))
+    shutil.rmtree(cache_dir / "dsAAA")
 
-    def _boom(*a):
-        raise AssertionError("conversion must not run for a non-mesh artifact")
+    props = await service.mesh_viewer_props(dict(_MESH))
 
-    monkeypatch.setattr(service, "_convert_sync", _boom)
-
-    art = {"artifact_id": "p1", "name": "report.pdf", "mime_type": "application/pdf", "uri": "file:///r.pdf"}
-    response = types.SimpleNamespace(new_artifacts=[art], artifacts=[art])
-
-    await service.enrich_mesh_artifacts(response)
-
-    assert art.get("json_body") is None
+    assert len(converts) == 2 and props["datasetId"] == "dsAAA"
 
 
-async def test_enrich_downgrades_gracefully_on_conversion_failure(monkeypatch, tmp_path):
+async def test_viewer_props_dedupes_concurrent_requests(monkeypatch, tmp_path, cache_dir):
+    downloads = _stub_resolver(monkeypatch, tmp_path)
+    converts = _stub_converter(monkeypatch, delay=0.1)
+
+    results = await asyncio.gather(*(service.mesh_viewer_props(dict(_MESH)) for _ in range(3)))
+
+    assert len(downloads) == 1 and len(converts) == 1
+    assert {r["datasetId"] for r in results} == {"dsAAA"}
+
+
+async def test_viewer_props_conversion_failure_propagates_and_is_retried(monkeypatch, tmp_path, cache_dir):
     _stub_resolver(monkeypatch, tmp_path)
 
     def _fail(*a):
         raise RuntimeError("vtk blew up")
 
     monkeypatch.setattr(service, "_convert_sync", _fail)
+    with pytest.raises(RuntimeError):
+        await service.mesh_viewer_props(dict(_MESH))
+    assert not (cache_dir / ".index").exists()  # nothing recorded for a failed source
 
-    art = {"artifact_id": "m2", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x.exo"}
-    response = types.SimpleNamespace(new_artifacts=[art], artifacts=[art])
-
-    await service.enrich_mesh_artifacts(response)  # must not raise
-
-    assert art.get("json_body") is None  # left null → frontend downgrades to a download
+    converts = _stub_converter(monkeypatch)
+    assert (await service.mesh_viewer_props(dict(_MESH)))["datasetId"] == "dsAAA"
+    assert len(converts) == 1
 
 
-async def test_enrich_skips_mesh_without_uri(monkeypatch):
+async def test_viewer_props_unresolvable_source(monkeypatch, cache_dir):
+    async def _none(uri, *, cache_dir, artifact=None, artifact_id=None):
+        return None
+
+    monkeypatch.setattr(uri_resolver, "resolve_to_local_path", _none)
+    with pytest.raises(service.MeshUnavailable):
+        await service.mesh_viewer_props(dict(_MESH))
+
+
+async def test_viewer_props_requires_uri(monkeypatch, cache_dir):
     def _boom(*a):
-        raise AssertionError("conversion must not run without a resolvable uri")
+        raise AssertionError("conversion must not run without a uri")
 
     monkeypatch.setattr(service, "_convert_sync", _boom)
-
-    art = {"artifact_id": "m3", "name": "mesh.exo", "mime_type": "application/x-exodus"}  # no uri
-    response = types.SimpleNamespace(new_artifacts=[art], artifacts=[art])
-
-    await service.enrich_mesh_artifacts(response)
-
-    assert art.get("json_body") is None
+    with pytest.raises(service.MeshUnavailable):
+        await service.mesh_viewer_props({"artifact_id": "m3", "name": "mesh.exo"})
 
 
 # --------------------------------------------------------------------------- #
@@ -252,7 +278,8 @@ def test_reject_unsafe_segment_blocks_traversal():
     _reject_unsafe_segment("surface_t0000.vtp")
 
     # traversal / separators / bad chars are rejected with 400
-    for bad in ["..", "../etc", "a/b", "a\\b", "..%2f", "foo bar", ""]:
+    # …and so is anything dot-prefixed, which keeps the cache's `.index/` unreachable
+    for bad in ["..", "../etc", "a/b", "a\\b", "..%2f", "foo bar", "", ".index", ".hidden"]:
         with pytest.raises(HTTPException) as exc:
             _reject_unsafe_segment(bad)
         assert exc.value.status_code == 400
@@ -305,12 +332,13 @@ def test_convert_sync_stl_branch_uses_cache(tmp_path):
     cache_root = tmp_path / "cache"
     cache_root.mkdir()
 
-    dataset_id, manifest, metadata = service._convert_sync(stl_path, cache_root, "sphere.stl", "", "model/stl")
+    dataset_id = service._convert_sync(stl_path, cache_root, "sphere.stl", "", "model/stl")
     assert dataset_id == compute_dataset_id(stl_path, {"type": "stl"})
     assert (cache_root / dataset_id / "surface_t0000.vtp").is_file()
-    assert manifest["num_timesteps"] == 1
-    assert metadata["num_elements"] > 0
+    props = service._props_from_cache(cache_root, dataset_id, "sphere.stl")
+    assert props is not None
+    assert props["metadata"]["num_elements"] > 0
 
     # Second call is a cache hit (manifest already present) — same id, still valid.
-    dataset_id2, _, _ = service._convert_sync(stl_path, cache_root, "sphere.stl", "", "model/stl")
+    dataset_id2 = service._convert_sync(stl_path, cache_root, "sphere.stl", "", "model/stl")
     assert dataset_id2 == dataset_id

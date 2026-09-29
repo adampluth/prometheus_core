@@ -85,6 +85,9 @@ export interface ArtifactMeta {
   /** Bytes for this artifact (`/api/conversations/{id}/artifacts/{aid}/content`);
    * used directly as an <img>/<embed> src or fetch target. */
   content_url: string;
+  /** Mesh artifacts only (`…/{aid}/mesh`): MeshViewer props, converted on first
+   * request — fetched lazily once the viewer scrolls into view. */
+  mesh_url?: string | null;
   citation?: Citation | null;
   producer_agent_id?: string | null;
   created_at?: string | null;

@@ -8,6 +8,14 @@
  * with field variables it shows a variable selector and colorbar; with
  * neither (an STL) it just renders geometry.
  *
+ * Loading is lazy: an artifact element carries only `meshUrl` (the artifact's
+ * `mesh_url`). Nothing is fetched until the viewer comes within ~200px of the
+ * viewport; the first fetch of a mesh makes the backend convert it (which can take
+ * a while for a large Exodus file), later ones hit its conversion cache. Fetched
+ * props are kept per URL for the page's lifetime, so scrolling back or reopening
+ * the conversation doesn't ask again. Elements that arrive with an inline
+ * `manifest`/`baseUrl` render straight away.
+ *
  * Known pipeline limitations (not fixable from the frontend):
  *   - `representation: "surface" | "volume"` is accepted by the backend's
  *     ConvertRequest but never read — everything is surface geometry.
@@ -28,6 +36,8 @@ import type { ColorPreset, PickResult } from "./MeshViewerEngine";
 import type { ViewerProps } from "@/lib/chainlit/elements";
 
 type MeshProps = {
+  meshUrl?: string;
+  downloadUrl?: string;
   datasetId?: string;
   baseUrl?: string;
   metadata?: {
@@ -69,8 +79,142 @@ function useTheme() {
   return isDark;
 }
 
+/** Viewer props fetched from a `mesh_url`, one request per URL per page load. */
+const meshPropsCache = new Map<string, Promise<MeshProps>>();
+
+async function fetchMeshProps(meshUrl: string): Promise<MeshProps> {
+  const res = await fetch(meshUrl, { credentials: "include" });
+  if (!res.ok) {
+    let detail = res.statusText || `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      if (body && typeof body.detail === "string") detail = body.detail;
+    } catch {
+      /* non-JSON error body — keep statusText */
+    }
+    throw new Error(detail);
+  }
+  return (await res.json()) as MeshProps;
+}
+
+function loadMeshProps(meshUrl: string): Promise<MeshProps> {
+  let pending = meshPropsCache.get(meshUrl);
+  if (!pending) {
+    pending = fetchMeshProps(meshUrl);
+    // Forget failures so a retry (or a later remount) asks again.
+    pending.catch(() => meshPropsCache.delete(meshUrl));
+    meshPropsCache.set(meshUrl, pending);
+  }
+  return pending;
+}
+
+type LoadState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; props: MeshProps }
+  | { status: "error"; message: string };
+
 export function MeshViewerElement({ element }: ViewerProps) {
   const props = ((element as { props?: MeshProps }).props) ?? {};
+  if (props.manifest || props.baseUrl) return <MeshViewerBody props={props} />;
+  return <LazyMeshViewer props={props} />;
+}
+
+/** Placeholder until scrolled near the viewport, then fetches `meshUrl` and mounts the viewer. */
+function LazyMeshViewer({ props }: { props: MeshProps }) {
+  const { meshUrl, downloadUrl } = props;
+  const title = props.title ?? "Mesh Viewer";
+  const height = props.height ?? "450px";
+  const placeholderRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const [state, setState] = useState<LoadState>({ status: "idle" });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    const node = placeholderRef.current;
+    if (visible || !node) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visible]);
+
+  useEffect(() => {
+    if (!visible) return;
+    if (!meshUrl) {
+      setState({ status: "error", message: "No mesh is available for this artifact." });
+      return;
+    }
+    let cancelled = false;
+    setState({ status: "loading" });
+    loadMeshProps(meshUrl).then(
+      (loaded) => !cancelled && setState({ status: "ready", props: loaded }),
+      (err: unknown) =>
+        !cancelled && setState({ status: "error", message: err instanceof Error ? err.message : String(err) }),
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, meshUrl, attempt]);
+
+  if (state.status === "ready") {
+    // The fetched props carry the dataset; the element's own display options win.
+    return <MeshViewerBody props={{ ...state.props, ...props, title }} />;
+  }
+
+  return (
+    <div
+      ref={placeholderRef}
+      className="mesh-viewer-root relative my-2 w-full max-w-full rounded-lg overflow-hidden border border-base-300 bg-base-200/40 flex flex-col"
+    >
+      <div className="flex items-center px-4 py-2 border-b border-base-300 bg-base-200/40 text-sm font-medium text-base-content">
+        {title}
+      </div>
+      <div
+        className="flex flex-col items-center justify-center gap-3 w-full bg-base-300/40 px-4 text-sm text-base-content/70"
+        style={{ height }}
+      >
+        {state.status === "error" ? (
+          <>
+            <div className="text-error/80 bg-error/10 border border-error/30 rounded px-3 py-2 max-w-full break-words">
+              {state.message}
+            </div>
+            <div className="flex items-center gap-2">
+              <button type="button" className="btn btn-xs" onClick={() => setAttempt((n) => n + 1)}>
+                Retry
+              </button>
+              {downloadUrl && (
+                <a className="btn btn-xs btn-ghost" href={downloadUrl} download>
+                  Download file
+                </a>
+              )}
+            </div>
+          </>
+        ) : state.status === "loading" ? (
+          <>
+            <span className="loading loading-spinner loading-md" />
+            <span>Preparing mesh… (the first view of a large mesh can take a while)</span>
+          </>
+        ) : (
+          <span>Mesh loads when scrolled into view</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function MeshViewerBody({ props }: { props: MeshProps }) {
   const datasetId = props.datasetId ?? "mesh";
   const baseUrl = props.baseUrl ?? "";
   const metadata = props.metadata ?? {};

@@ -538,27 +538,15 @@ def test_resume_rebinds_session_and_returns_transcript(monkeypatch):
     assert session.conversation_id == "c1"
 
 
-def test_resume_restores_mesh_viewer_body(monkeypatch, tmp_path):
-    """The stored catalog has no mesh ``json_body`` (only a live turn adds one), so
-    reopening a conversation must re-derive it or the MeshViewer degrades to a
-    download."""
-    from app import uri_resolver
-    from app.main import app
+def test_reopening_conversation_does_not_convert_meshes(monkeypatch):
+    """Reopening must stay cheap: meshes carry a lazy ``mesh_url`` instead of being
+    converted up front (the viewer fetches it once scrolled into view)."""
     from app.services.mesh import service as mesh_service
 
-    src = tmp_path / "mesh.exo"
-    src.write_bytes(b"fake-exodus-bytes")
+    def _boom(*_):
+        raise AssertionError("reopening a conversation must not convert meshes")
 
-    async def _resolve(uri, *, cache_dir, artifact=None, artifact_id=None):
-        return src
-
-    manifest = {"num_timesteps": 1, "files": [], "variables": {"point": ["temperature"], "cell": []}}
-    monkeypatch.setattr(uri_resolver, "resolve_to_local_path", _resolve)
-    monkeypatch.setattr(
-        mesh_service,
-        "_convert_sync",
-        lambda *_: ("dsAAA", manifest, {"num_timesteps": 1, "time_values": [0.0]}),
-    )
+    monkeypatch.setattr(mesh_service, "_convert_sync", _boom)
 
     mesh = {"artifact_id": "m1", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x/mesh.exo"}
     fake = _detail_client(monkeypatch, conversations={"c1": {"user_query": "mesh it"}}, owners={"c1": "alice"})
@@ -569,7 +557,5 @@ def test_resume_restores_mesh_viewer_body(monkeypatch, tmp_path):
         assert resp.status_code == 200
         [artifact] = resp.json()["artifacts"]
         assert artifact["render_hint"] == "mesh"
-        assert artifact["json_body"]["datasetId"] == "dsAAA"
-
-    session = app.state.session_store.get("sid-conv")
-    assert session.artifacts[0]["json_body"]["datasetId"] == "dsAAA"
+        assert artifact["json_body"] is None
+        assert artifact["mesh_url"] == "/api/conversations/c1/artifacts/m1/mesh"
