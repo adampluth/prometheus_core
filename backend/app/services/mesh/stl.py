@@ -2,8 +2,8 @@
 
 Ported from the old ``frontend/components/stl_integration.py``, dropping the Chainlit
 element construction, the ``utils.settings`` dependency, the ``MeshDataset`` wrapper
-and the async wrappers (the app-facing async + cache orchestration now lives in
-:mod:`app.services.mesh.service`). An STL is converted to exactly the same VTP +
+and the async wrappers (the mesh previewer, :mod:`app.services.mesh.preview`, calls this; the generic
+preview service owns the async + cache orchestration). An STL is converted to exactly the same VTP +
 ``manifest.json`` + ``meta.json`` output the Exodus path produces, so the shared React
 MeshViewer renders it identically (it degrades to "one timestep, no variables").
 

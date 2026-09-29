@@ -1,10 +1,9 @@
 """Public sync API for the Exodus II converter.
 
 Ported from the old ``frontend/components/exodus/api.py``, keeping the synchronous
-:func:`convert_exodus` / :func:`inspect_exodus` with content-hash caching. The async
-thread-pool orchestration that used to live here now lives in
-:mod:`app.services.mesh.service` (which owns the executor and drives both the Exodus
-and STL paths). ``import vtk`` transitively via :mod:`vtk_pipeline` — import lazily.
+:func:`convert_exodus` / :func:`inspect_exodus`. The mesh previewer
+(:mod:`app.services.mesh.preview`) drives both the Exodus and STL paths; the generic
+preview service (:mod:`app.services.previews`) owns the thread pool and the cache. ``import vtk`` transitively via :mod:`vtk_pipeline` — import lazily.
 """
 
 from __future__ import annotations

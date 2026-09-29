@@ -2,7 +2,7 @@
 
 Ported from the old ``frontend/components/exodus/vtk_pipeline.py``. This module
 ``import vtk`` at load time, so it must only ever be imported *lazily* from a
-conversion code path (see :mod:`app.services.mesh.service`), never at app/router
+conversion code path (see :mod:`app.services.mesh.preview`), never at app/router
 import time — the offline backend test environment does not install VTK.
 """
 
