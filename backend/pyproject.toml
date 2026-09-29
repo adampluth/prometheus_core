@@ -43,13 +43,16 @@ dev = [
     # In-memory async DB for admin-plane tests (app/db.py, tests/conftest.py) --
     # tests never touch real Postgres; only Alembic/production use asyncpg.
     "aiosqlite>=0.20",
+    "fakeredis>=2.26",
 ]
 
 [tool.uv.sources]
-# TODO: re-pin to main (or a version tag) once prometheus_api a2a_1.0 merges.
+# Pinned to the commit the base image is built from: keep `rev` equal to (the full
+# sha of) PROMETHEUS_API_BASE_IMAGE_HASH in ../Makefile, so local runs and tests use
+# the same prometheus_api as the containers. Bump both together.
 # Working on prometheus_api locally? Override with:
 #   uv pip install -e /path/to/prometheus_api
-prometheus-api = { git = "https://github.inl.gov/genesis/prometheus_api.git", branch = "a2a_1.0" }
+prometheus-api = { git = "https://github.inl.gov/genesis/prometheus_api.git", rev = "23c945443f7113299ba12283d178bb087d6fba35" }
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
