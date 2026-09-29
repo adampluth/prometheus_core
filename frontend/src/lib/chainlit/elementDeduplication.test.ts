@@ -7,6 +7,7 @@ type TestElement = {
   id?: string;
   type: string;
   name?: string;
+  url?: string;
   props?: Record<string, unknown>;
 };
 
@@ -50,4 +51,22 @@ test("collapses duplicate delivery of the same mesh dataset", () => {
     dedupeElements([first, duplicate], classifyElement),
     [first],
   );
+});
+
+test("keeps distinct artifacts that share a display name", () => {
+  const elements: TestElement[] = [
+    { id: "a1", type: "image", name: "plot.png", url: "/c/a1/content", props: { artifact_id: "a1" } },
+    { id: "a2", type: "image", name: "plot.png", url: "/c/a2/content", props: { artifact_id: "a2" } },
+    { id: "j1", type: "custom", name: "CollapsibleJson", props: { name: "result", artifact_id: "j1" } },
+    { id: "j2", type: "custom", name: "CollapsibleJson", props: { name: "result", artifact_id: "j2" } },
+  ];
+
+  assert.deepEqual(dedupeElements(elements, classifyElement), elements);
+});
+
+test("collapses the same artifact delivered twice", () => {
+  const first: TestElement = { id: "x", type: "image", name: "plot.png", props: { artifact_id: "a1" } };
+  const again: TestElement = { id: "y", type: "image", name: "renamed.png", props: { artifact_id: "a1" } };
+
+  assert.deepEqual(dedupeElements([first, again], classifyElement), [first]);
 });
