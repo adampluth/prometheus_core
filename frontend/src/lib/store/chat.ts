@@ -155,23 +155,14 @@ function assistantFrom(res: ChatMessageResponse, text: string): AssistantItem {
   };
 }
 
-/** Map a resumed conversation's normalized transcript to renderable items.
- * Artifacts aren't correlated per-turn server-side, so the whole catalog is
- * attached to the last assistant turn (best-effort — matches what a live
- * completed-turn response would have shown at the time). */
-function itemsFromTranscript(messages: ConversationMessage[], artifacts: ArtifactMeta[]): ChatItem[] {
-  const items: ChatItem[] = messages.map((m) =>
+/** Map a resumed conversation's normalized transcript to renderable items; the
+ * backend has already attached each artifact to the reply that produced it. */
+function itemsFromTranscript(messages: ConversationMessage[]): ChatItem[] {
+  return messages.map((m) =>
     m.role === "user"
       ? { id: nextId("user"), kind: "user", text: m.content }
-      : assistantItem(m.content),
+      : assistantItem(m.content, m.artifacts ?? []),
   );
-  for (let i = items.length - 1; i >= 0; i -= 1) {
-    if (items[i].kind === "assistant") {
-      (items[i] as AssistantItem).artifacts = artifacts;
-      break;
-    }
-  }
-  return items;
 }
 
 /** Mark the in-flight turn's ToolStep done (leaves its progress trace collapsed). */
@@ -461,20 +452,27 @@ async function reset(profile?: string): Promise<void> {
   bumpHistory();
 }
 
+// Bumped per loadConversation call, so a slow response for a conversation the user
+// has already clicked away from can't overwrite the one they're now looking at.
+let loadSeq = 0;
+
 /** Reopen a past conversation: rebinds the session server-side (so the next
  * turn continues it) and replays its transcript. Mirrors `reset()`'s shape. */
 async function loadConversation(conversationId: string): Promise<void> {
+  const seq = ++loadSeq;
   disconnect();
   awaitedTaskIds.clear();
   set({ items: [], awaiting: false });
   try {
     const detail = await api.resumeConversation(conversationId);
+    if (seq !== loadSeq) return; // superseded by a later click; that load owns the view
     set({
       conversationId: detail.conversation_id,
       autoApprove: detail.auto_approve_steps,
-      items: itemsFromTranscript(detail.messages, detail.artifacts),
+      items: itemsFromTranscript(detail.messages),
     });
   } catch (err) {
+    if (seq !== loadSeq) return;
     appendError(err instanceof Error ? err.message : "Failed to open conversation.");
   }
   connect();

@@ -44,11 +44,7 @@ def get_max_upload_bytes(data: dict[str, Any]) -> int:
 
 def _jwt_secret(data: dict[str, Any]) -> str:
     # Prefer a dedicated secret, then reuse Chainlit's, then the config file value.
-    return (
-        os.environ.get("BACKEND_JWT_SECRET")
-        or os.environ.get("CHAINLIT_AUTH_SECRET")
-        or data.get("jwt-secret", "")
-    )
+    return os.environ.get("BACKEND_JWT_SECRET") or os.environ.get("CHAINLIT_AUTH_SECRET") or data.get("jwt-secret", "")
 
 
 def _dev_cors_origins() -> list[str]:
@@ -105,9 +101,9 @@ class Settings(BaseSettings):
     # Uploads
     max_upload_bytes: int = get_max_upload_bytes(data)
 
-    # Mesh (Exodus/STL) → VTP conversion cache root (empty = <tempdir>/prometheus-mesh).
-    # Overridden by env PROMETHEUS_MESH_CACHE_DIR.
-    mesh_cache_dir: str = os.environ.get("PROMETHEUS_MESH_CACHE_DIR", data.get("mesh-cache-dir", ""))
+    # Built artifact previews (e.g. meshes converted to VTP), see services/previews.
+    # Empty = <tempdir>/prometheus-previews. Overridden by env PROMETHEUS_PREVIEW_CACHE_DIR.
+    preview_cache_dir: str = os.environ.get("PROMETHEUS_PREVIEW_CACHE_DIR", data.get("preview-cache-dir", ""))
 
     # Behavior
     debug: bool = data.get("debug", False)

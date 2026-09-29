@@ -315,29 +315,30 @@ distribution table, key generation steps, and rotation guide.
 
 ---
 
-## Mesh/IFC dataset isolation (decision: no per-user path namespacing)
+## Artifact preview isolation (decision: no per-user path namespacing)
 
-`GET /api/artifacts/mesh/{dataset_id}/{filename}` (`backend/app/routers/artifacts.py`)
+`GET /api/previews/{key}/{filename}` (`backend/app/routers/artifacts.py`), which
+serves built artifact previews such as converted mesh timesteps,
 requires a valid session (`Depends(current_claims)`) — a real improvement over
 the old Chainlit setup, which served `/public/mesh-data/{dataset_id}/...`
 **unauthenticated**. But the endpoint is deliberately **not** per-user
-path-namespaced: `dataset_id` is a content hash and the converted-VTP cache is
-shared across users by design (uploading the same file twice converts once).
+path-namespaced: `key` hashes the source URI and the preview cache is shared
+across users by design (a source is built once however many people view it).
 
 This is intentional, not an oversight. The actual data-access boundary is
 **DeepLynx itself**: each user/project has separate DeepLynx credentials
 (see Credential broker below), so a user can never reach another user's
 *source* artifact regardless of how the local rendering cache is laid out —
-namespacing the local VTP cache by user would only protect a cache of content
+namespacing the local preview cache by user would only protect a cache of content
 the requester could already fetch on their own.
-`GET /api/conversations/{cid}/artifacts/{aid}/content` (the non-mesh artifact
-endpoint) is separately — and more strongly — isolated: it first checks that the
+`GET /api/conversations/{cid}/artifacts/{aid}/content` (and `/preview`, which builds the
+preview) is separately — and more strongly — isolated: it first checks that the
 caller owns `cid` (`user:convs:{user}`, or has a session currently bound to it —
 only ever a server-minted id or an ownership-checked resume) and then resolves
 `aid` only within that conversation's catalog, so it can only ever address the
 caller's own artifacts.
 
-If this changes (e.g. mesh conversion moves to per-user DeepLynx-backed
+If this changes (e.g. preview building moves to per-user DeepLynx-backed
 storage rather than a local disk cache), revisit this section before assuming
 the auth gate alone is sufficient.
 

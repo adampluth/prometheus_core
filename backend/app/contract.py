@@ -213,8 +213,9 @@ class ArtifactMeta(BaseModel):
     ``ArtifactReference`` fields the frontend needs, plus the derived
     ``render_hint``. ``json_body`` is inline-only; bytes are fetched from
     ``content_url`` (``GET /api/conversations/{id}/artifacts/{artifact_id}/content``).
-    Mesh artifacts also carry ``mesh_url`` (``…/{artifact_id}/mesh``), which returns
-    the MeshViewer props, converting on first request.
+    Artifacts that need a processed rendition to be viewed (a mesh converted to VTP)
+    also carry ``preview_url`` (``…/{artifact_id}/preview``), which returns the
+    viewer's props, building the preview on first request (see ``services/previews``).
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -229,7 +230,7 @@ class ArtifactMeta(BaseModel):
     json_body: Optional[Any] = None  # inline only
     render_hint: RenderHint = "unknown"
     content_url: str = ""
-    mesh_url: Optional[str] = None  # mesh artifacts only
+    preview_url: Optional[str] = None  # set when a previewer applies
     citation: Optional[Citation] = None  # populated for reference/citation artifacts
     producer_agent_id: Optional[str] = None
     created_at: Optional[str] = None
@@ -436,13 +437,18 @@ class ConversationHistoryResponse(BaseModel):
 class ConversationMessage(BaseModel):
     """One normalized chat turn, as returned by the conversation-detail/resume
     endpoints. Distinct from the richer live ``ChatMessageResponse``: this is a
-    display-only replay of a past turn, not a re-playable turn result."""
+    display-only replay of a past turn, not a re-playable turn result.
+
+    ``artifacts`` (assistant messages only) are the artifacts produced by the turn
+    this message answered — attributed by ``created_at`` against the transcript's
+    timestamps, see ``services/artifacts.attribute_artifacts``."""
 
     model_config = ConfigDict(extra="ignore")
 
     role: Literal["user", "assistant"]
     content: str = ""
     timestamp: str = ""
+    artifacts: list[ArtifactMeta] = Field(default_factory=list)
 
 
 class ConversationDetailResponse(BaseModel):
@@ -458,7 +464,6 @@ class ConversationDetailResponse(BaseModel):
     profile: str = ""
     auto_approve_steps: bool = False
     messages: list[ConversationMessage] = Field(default_factory=list)
-    artifacts: list[ArtifactMeta] = Field(default_factory=list)
 
 
 class ConversationRenameRequest(BaseModel):

@@ -1,4 +1,4 @@
-"""Artifact content, mesh viewer props, and converted mesh files.
+"""Artifact content, artifact previews, and preview files.
 
 ``GET /api/conversations/{cid}/artifacts/{aid}/content`` — resolve + stream bytes (D3).
 
@@ -22,10 +22,12 @@ Consolidates Chainlit's ``_render_pdf_artifact`` / ``_render_remote_file_artifac
 ``_render_file_artifact`` / ``_render_download_artifact`` into one endpoint; the React
 viewers fetch bytes from here instead of the server building elements (task 07).
 
-``GET /api/conversations/{cid}/artifacts/{aid}/mesh`` — the MeshViewer props for a
-mesh artifact (same access check), converting it on first request. The viewer calls it
-only once scrolled into view (``ArtifactMeta.mesh_url``). ``GET
-/api/artifacts/mesh/{dataset_id}/{filename}`` then serves the converted ``.vtp`` files.
+``GET /api/conversations/{cid}/artifacts/{aid}/preview`` — the viewer props for an
+artifact that needs a processed rendition (same access check), building it on first
+request with whichever previewer applies (``services/previews``). The frontend calls it
+only once the viewer scrolls into view (``ArtifactMeta.preview_url``). ``GET
+/api/previews/{key}/{filename}`` then serves the preview's files. Nothing here knows
+what kind of artifact a preview is for.
 """
 
 from __future__ import annotations
@@ -49,8 +51,9 @@ from app.config import settings
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import artifact_download_payload, classify_render_hint
-from app.services.mesh.exceptions import ConverterError
-from app.services.mesh.service import MeshUnavailable, mesh_cache_root, mesh_viewer_props
+from app.services.previews import PreviewUnavailable, PreviewUnreadable
+from app.services.previews.registry import previewer_for
+from app.services.previews.service import preview_props, preview_root
 from app.sessions import SessionStore
 
 logger = logging.getLogger(__name__)
@@ -66,9 +69,9 @@ _CACHE_HEADERS = {"Cache-Control": "private, max-age=604800, immutable"}
 _DOWNLOAD_HINTS = {"file", "unknown"}
 
 # One safe path segment (no separators; a leading dot additionally rejected below, which
-# also rules out `..` and keeps the cache's `.index/` unreachable). Guards the
-# dataset_id/filename the browser sends to the mesh VTP route.
-_MESH_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+# also rules out `..` and keeps the cache's `.build-*` scratch dirs unreachable). Guards
+# the key/filename the browser sends to the preview file route.
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 # One client reused across requests (see routers/conversations.py for the rationale).
@@ -202,65 +205,68 @@ async def get_artifact_content(
     )
 
 
-@router.get("/conversations/{conversation_id}/artifacts/{artifact_id}/mesh")
-async def get_artifact_mesh(
+@router.get("/conversations/{conversation_id}/artifacts/{artifact_id}/preview")
+async def get_artifact_preview(
     conversation_id: str,
     artifact_id: str,
     request: Request,
     claims: TokenClaims = Depends(current_claims),
 ) -> Response:
-    """MeshViewer props (``manifest``/``baseUrl``/``metadata``/``title``) for a mesh artifact.
+    """The viewer props for an artifact's preview, plus ``baseUrl`` for its files.
 
-    The first request for a source downloads and converts it (seconds to minutes for a
-    large Exodus file); after that it's a disk read (see ``services/mesh/service.py``).
-    Failures return an error the viewer shows next to a download link: 502 when the
-    source can't be fetched, 422 when it isn't a readable mesh, 500 otherwise.
+    The first request for a source builds the preview (seconds to minutes for a large
+    mesh); after that it's a disk read (see ``services/previews/service.py``). Failures
+    return an error the viewer shows next to a download link: 502 when the source
+    can't be fetched, 422 when the previewer can't read it, 500 otherwise.
     """
     artifact = await find_owned_artifact(conversation_id, artifact_id, request, claims)
-    if classify_render_hint(artifact) != "mesh":
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Artifact is not a mesh.")
+    previewer = previewer_for(artifact, classify_render_hint(artifact))
+    if previewer is None:
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Artifact has no preview.")
 
     try:
-        props = await mesh_viewer_props(artifact)
-    except MeshUnavailable as exc:
-        raise HTTPException(status_code=http_status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch mesh: {exc}")
-    except ConverterError as exc:
-        raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Could not read mesh: {exc}")
+        props = await preview_props(previewer, artifact)
+    except PreviewUnavailable as exc:
+        raise HTTPException(status_code=http_status.HTTP_502_BAD_GATEWAY, detail=f"Could not fetch artifact: {exc}")
+    except PreviewUnreadable as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Could not read artifact: {exc}"
+        )
     except Exception:
-        logger.exception("Mesh conversion failed for artifact %s", artifact_id)
-        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Mesh conversion failed.")
+        logger.exception("Building the %s preview failed for artifact %s", previewer.name, artifact_id)
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Preview failed.")
     return JSONResponse(props, headers=_CACHE_HEADERS)
 
 
 def _reject_unsafe_segment(value: str) -> None:
     """Reject any path segment that isn't a single safe name (path-traversal guard)."""
-    if not _MESH_SEGMENT_RE.match(value) or value.startswith("."):
-        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Invalid mesh path.")
+    if not _SAFE_SEGMENT_RE.match(value) or value.startswith("."):
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Invalid preview path.")
 
 
-@router.get("/artifacts/mesh/{dataset_id}/{filename}")
-async def get_mesh_file(
-    dataset_id: str,
+@router.get("/previews/{key}/{filename}")
+async def get_preview_file(
+    key: str,
     filename: str,
     claims: TokenClaims = Depends(current_claims),
 ) -> Response:
-    """Serve a converted VTP timestep for the React MeshViewer (auth-required).
+    """Serve one file of a built preview (auth-required).
 
-    The mesh props' ``baseUrl`` is ``/api/artifacts/mesh/{dataset_id}`` (see
-    ``services/mesh/service.py``); the viewer fetches each ``${baseUrl}/${filename}``
-    from here. ``dataset_id`` is a content hash and the cached files are
-    session-independent, so the guard is auth + path-traversal safety: both segments
-    must be single safe names and the resolved path must stay inside the mesh cache
-    root. Content-addressed, hence cacheable forever.
+    A preview's props carry ``baseUrl`` = ``/api/previews/{key}``; its viewer fetches
+    ``${baseUrl}/${filename}`` from here. The key hashes the source URI and the files
+    are session-independent, so the guard is auth + path-traversal safety: both
+    segments must be single safe names and the resolved path must stay inside the
+    preview cache. Immutable, hence cacheable forever.
     """
-    _reject_unsafe_segment(dataset_id)
+    _reject_unsafe_segment(key)
     _reject_unsafe_segment(filename)
 
-    root = mesh_cache_root().resolve()
-    candidate = (root / dataset_id / filename).resolve()
+    root = preview_root().resolve()
+    candidate = (root / key / filename).resolve()
     if not candidate.is_relative_to(root):  # defense in depth beyond the segment check
-        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Invalid mesh path.")
+        raise HTTPException(status_code=http_status.HTTP_400_BAD_REQUEST, detail="Invalid preview path.")
     if not candidate.is_file():
-        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Mesh file not found.")
+        raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Preview file not found.")
 
-    return FileResponse(path=str(candidate), media_type="application/xml", headers=_CACHE_HEADERS)
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    return FileResponse(path=str(candidate), media_type=media_type, headers=_CACHE_HEADERS)

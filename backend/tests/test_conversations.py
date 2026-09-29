@@ -538,24 +538,60 @@ def test_resume_rebinds_session_and_returns_transcript(monkeypatch):
     assert session.conversation_id == "c1"
 
 
-def test_reopening_conversation_does_not_convert_meshes(monkeypatch):
-    """Reopening must stay cheap: meshes carry a lazy ``mesh_url`` instead of being
-    converted up front (the viewer fetches it once scrolled into view)."""
-    from app.services.mesh import service as mesh_service
+def test_reopening_conversation_does_not_build_previews(monkeypatch):
+    """Reopening must stay cheap: artifacts needing a preview carry a lazy
+    ``preview_url`` instead of being processed up front (the viewer fetches it once
+    scrolled into view)."""
+    from app.services.previews import service as preview_service
 
     def _boom(*_):
-        raise AssertionError("reopening a conversation must not convert meshes")
+        raise AssertionError("reopening a conversation must not build previews")
 
-    monkeypatch.setattr(mesh_service, "_convert_sync", _boom)
+    monkeypatch.setattr(preview_service, "_build_sync", _boom)
 
     mesh = {"artifact_id": "m1", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x/mesh.exo"}
-    fake = _detail_client(monkeypatch, conversations={"c1": {"user_query": "mesh it"}}, owners={"c1": "alice"})
+    conv = {"user_query": "mesh it", "conversation_history": [{"role": "assistant", "content": "done"}]}
+    fake = _detail_client(monkeypatch, conversations={"c1": conv}, owners={"c1": "alice"})
     monkeypatch.setattr(fake, "get_artifacts", lambda _conv_id: [dict(mesh)])
     client = _authed_client(monkeypatch)
 
     for resp in (client.get("/api/conversations/c1"), client.post("/api/conversations/c1/resume")):
         assert resp.status_code == 200
-        [artifact] = resp.json()["artifacts"]
+        [artifact] = resp.json()["messages"][0]["artifacts"]
         assert artifact["render_hint"] == "mesh"
         assert artifact["json_body"] is None
-        assert artifact["mesh_url"] == "/api/conversations/c1/artifacts/m1/mesh"
+        assert artifact["preview_url"] == "/api/conversations/c1/artifacts/m1/preview"
+
+
+def test_detail_attaches_artifacts_to_the_turn_that_produced_them(monkeypatch):
+    conv = {
+        "conversation_history": [
+            {"role": "user", "content": "plot it", "timestamp": "2026-09-01T10:00:00+00:00"},
+            {"role": "assistant", "content": "plotted", "timestamp": "2026-09-01T10:01:00+00:00"},
+            {"role": "user", "content": "again", "timestamp": "2026-09-01T11:00:00+00:00"},
+            {"role": "assistant", "content": "replotted", "timestamp": "2026-09-01T11:01:00+00:00"},
+        ],
+    }
+    artifacts = [
+        {"artifact_id": "a", "name": "a.png", "created_at": "2026-09-01T10:00:30+00:00"},
+        {"artifact_id": "b", "name": "b.png", "created_at": "2026-09-01T11:00:30+00:00"},
+        {"artifact_id": "c", "name": "c.png"},  # no timestamp → last reply
+        {"artifact_id": "d", "name": "d.png", "created_at": "2026-09-01T12:00:00+00:00"},  # after every reply
+    ]
+    fake = _detail_client(monkeypatch, conversations={"c1": conv}, owners={"c1": "alice"})
+    monkeypatch.setattr(fake, "get_artifacts", lambda _conv_id: artifacts)
+    client = _authed_client(monkeypatch)
+
+    messages = client.get("/api/conversations/c1").json()["messages"]
+    assert [[a["artifact_id"] for a in m["artifacts"]] for m in messages] == [[], ["a"], [], ["b", "c", "d"]]
+
+
+def test_detail_keeps_artifacts_when_transcript_has_no_reply(monkeypatch):
+    conv = {"conversation_history": [{"role": "user", "content": "go", "timestamp": "2026-09-01T10:00:00+00:00"}]}
+    fake = _detail_client(monkeypatch, conversations={"c1": conv}, owners={"c1": "alice"})
+    monkeypatch.setattr(fake, "get_artifacts", lambda _conv_id: [{"artifact_id": "a", "name": "a.png"}])
+    client = _authed_client(monkeypatch)
+
+    messages = client.get("/api/conversations/c1").json()["messages"]
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert [a["artifact_id"] for a in messages[1]["artifacts"]] == ["a"]

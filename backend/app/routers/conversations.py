@@ -39,7 +39,7 @@ from app.contract import (
 )
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
-from app.services.artifacts import shape_artifacts
+from app.services.artifacts import attribute_artifacts, shape_artifacts
 from app.sessions import SessionState, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -125,18 +125,19 @@ def _fetch_detail(conv_id: str, user_id: str) -> tuple[bool, Any]:
 
 
 async def _load_detail(conv_id: str, user_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
-    """Fetch a conversation the caller owns (404 otherwise) with its artifacts shaped.
+    """Fetch a conversation the caller owns (404 otherwise), its artifacts shaped and
+    attached to the replies of the turns that produced them.
 
-    Shaping is metadata only — meshes are converted lazily when their viewer scrolls
-    into view (``ArtifactMeta.mesh_url``), so reopening a conversation is cheap no
-    matter how many meshes it holds. Returns the raw catalog too, for resume to put
-    on the session.
+    Shaping is metadata only — previews (e.g. mesh conversion) are built lazily when
+    their viewer scrolls into view (``ArtifactMeta.preview_url``), so reopening a
+    conversation is cheap no matter what it holds. Returns the raw catalog too, for
+    resume to put on the session.
     """
     found, loaded = await asyncio.to_thread(_fetch_detail, conv_id, user_id)
     if not found:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Conversation not found")
     detail, raw_artifacts = cast(tuple[ConversationDetailResponse, list[dict]], loaded)
-    detail.artifacts = shape_artifacts(raw_artifacts, conv_id)
+    attribute_artifacts(detail.messages, shape_artifacts(raw_artifacts, conv_id))
     return detail, raw_artifacts
 
 
@@ -197,8 +198,8 @@ async def resume_conversation(
     claims: TokenClaims = Depends(current_claims),
 ) -> ConversationDetailResponse:
     """Rebind the caller's session to a past conversation so the next chat turn
-    continues it. Returns its transcript + artifact catalog in the same call so
-    the frontend can render history and resume in one round-trip."""
+    continues it. Returns its transcript (artifacts attached per turn) in the same
+    call so the frontend can render history and resume in one round-trip."""
     detail, raw_artifacts = await _load_detail(conversation_id, claims.sub)
 
     store = _get_store(request)

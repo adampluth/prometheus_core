@@ -3,7 +3,8 @@
 The turn orchestrator (task 04) calls :func:`to_artifact_meta` to shape each raw
 catalog dict from ``ConversationResponse`` into the frozen :class:`ArtifactMeta`
 wire shape, and :func:`shape_artifacts` to build the list for a completed turn.
-Both are conversation-scoped: every shaped artifact carries a ``content_url`` under
+Both are conversation-scoped: every shaped artifact carries a ``content_url`` (and,
+when a previewer applies, a ``preview_url``) under
 ``/api/conversations/{id}/artifacts/{artifact_id}``, so the frontend fetches by
 (conversation, artifact) from the Redis catalog rather than from whatever the
 caller's session happens to be bound to.
@@ -29,12 +30,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from urllib.parse import quote
 
-from app.contract import ArtifactMeta, Citation, RenderHint
+from app.contract import ArtifactMeta, Citation, ConversationMessage, RenderHint
+from app.services.previews.registry import previewer_for
 
 # --------------------------------------------------------------------------- #
 # Classifier trigger tables — copied verbatim from frontend/plugins/<name>/__init__.py
@@ -164,9 +167,7 @@ def artifact_identity(artifact: dict[str, Any]) -> str:
     explicit = str(artifact.get("artifact_id") or artifact.get("id") or "")
     if explicit:
         return explicit
-    basis = "|".join(
-        str(artifact.get(key) or "") for key in ("uri", "name", "json_type")
-    )
+    basis = "|".join(str(artifact.get(key) or "") for key in ("uri", "name", "json_type"))
     basis += "|" + repr(artifact.get("json_body"))
     return "art-" + hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:16]
 
@@ -320,7 +321,7 @@ def to_artifact_meta(artifact: dict[str, Any], conversation_id: str) -> Optional
         json_body=artifact.get("json_body"),
         render_hint=render_hint,
         content_url=f"{base_url}/content",
-        mesh_url=f"{base_url}/mesh" if render_hint == "mesh" else None,
+        preview_url=f"{base_url}/preview" if previewer_for(artifact, render_hint) else None,
         citation=_citation_from(metadata),
         producer_agent_id=artifact.get("producer_agent_id"),
         created_at=artifact.get("created_at"),
@@ -335,3 +336,37 @@ def shape_artifacts(artifacts: list[dict[str, Any]], conversation_id: str) -> li
         if meta is not None:
             shaped.append(meta)
     return shaped
+
+
+def _parse_time(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def attribute_artifacts(messages: list[ConversationMessage], artifacts: list[ArtifactMeta]) -> None:
+    """Attach each artifact to the assistant message of the turn that produced it.
+
+    An artifact is registered while its turn runs, and the turn's reply is written to
+    the history when it finishes, so the artifact belongs to the first assistant
+    message timestamped at or after its ``created_at``. Artifacts with no usable
+    timestamp, or newer than every reply (a backgrounded turn still running), go to
+    the last assistant message — appended empty if the transcript has none, so no
+    artifact is dropped. Mutates ``messages``; catalog order is kept within a message.
+    """
+    if not artifacts:
+        return
+    replies = [(m, _parse_time(m.timestamp)) for m in messages if m.role == "assistant"]
+    if not replies:
+        messages.append(ConversationMessage(role="assistant"))
+        replies = [(messages[-1], None)]
+    for artifact in artifacts:
+        created = _parse_time(artifact.created_at)
+        target = replies[-1][0]
+        if created is not None:
+            target = next((m for m, at in replies if at is not None and at >= created), target)
+        target.artifacts.append(artifact)

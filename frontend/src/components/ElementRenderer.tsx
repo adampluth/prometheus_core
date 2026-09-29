@@ -19,6 +19,7 @@ import { Component, Suspense } from "react";
 import { AlertCircle } from "lucide-react";
 import {
   classifyElement,
+  DEFERRED_KINDS,
   VIEWER_REGISTRY,
   type AnyElement,
   type ViewerProps,
@@ -28,6 +29,7 @@ import {
   elementKey,
 } from "../lib/chainlit/elementDeduplication";
 import { NoViewerFallback } from "../viewers/FileDownloadElement";
+import { DeferredViewer } from "./DeferredViewer";
 
 // ---------------------------------------------------------------------------
 // Error boundary
@@ -59,10 +61,15 @@ class ViewerErrorBoundary extends Component<
 function ElementRenderer({ element, onSend }: ViewerProps) {
   const kind   = classifyElement(element);
   const Viewer = VIEWER_REGISTRY[kind];
+  // Heavy viewers, and any artifact whose viewer needs a backend-built preview, mount
+  // only near the viewport (see DeferredViewer).
+  const deferred = DEFERRED_KINDS.has(kind) || typeof element.props?.previewUrl === "string";
 
-  const inner = Viewer
-    ? <Suspense fallback={null}><Viewer element={element} onSend={onSend} /></Suspense>
-    : <NoViewerFallback element={element} />;
+  const inner = !Viewer
+    ? <NoViewerFallback element={element} />
+    : deferred
+      ? <DeferredViewer element={element} Viewer={Viewer} onSend={onSend} />
+      : <Suspense fallback={null}><Viewer element={element} onSend={onSend} /></Suspense>;
 
   return <ViewerErrorBoundary>{inner}</ViewerErrorBoundary>;
 }

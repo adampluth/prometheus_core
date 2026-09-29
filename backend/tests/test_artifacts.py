@@ -1,4 +1,4 @@
-"""Offline tests for artifact classification + the content and mesh-props routes (task 07).
+"""Offline tests for artifact classification + the content and preview routes (task 07).
 
 The classifier tests exercise ``classify_render_hint`` across json_type / tags /
 mime / extension precedence. The router tests drive
@@ -17,8 +17,7 @@ from fastapi.testclient import TestClient
 from app import uri_resolver
 from app.conversation_state import ConversationStateClient
 from app.routers import artifacts as artifacts_router
-from app.services.mesh import service as mesh_service
-from app.services.mesh.exceptions import ConverterError
+from app.services.previews import PreviewUnavailable, PreviewUnreadable
 from app.services.artifacts import (
     artifact_download_payload,
     artifact_identity,
@@ -99,11 +98,13 @@ def test_to_artifact_meta_scopes_content_url_to_conversation():
     assert meta.content_url == "/api/conversations/c%201/artifacts/a%2F1/content"
 
 
-def test_to_artifact_meta_mesh_url_only_for_meshes():
-    mesh = to_artifact_meta({"artifact_id": "m1", "name": "t.exo"}, "c1")
-    assert mesh is not None and mesh.mesh_url == "/api/conversations/c1/artifacts/m1/mesh"
-    pdf = to_artifact_meta({"artifact_id": "p1", "name": "r.pdf"}, "c1")
-    assert pdf is not None and pdf.mesh_url is None
+def test_to_artifact_meta_preview_url_only_when_a_previewer_applies():
+    mesh = to_artifact_meta({"artifact_id": "m1", "name": "t.exo", "uri": "file:///t.exo"}, "c1")
+    assert mesh is not None and mesh.preview_url == "/api/conversations/c1/artifacts/m1/preview"
+    pdf = to_artifact_meta({"artifact_id": "p1", "name": "r.pdf", "uri": "file:///r.pdf"}, "c1")
+    assert pdf is not None and pdf.preview_url is None
+    sourceless = to_artifact_meta({"artifact_id": "m2", "name": "t.exo"}, "c1")  # nothing to build from
+    assert sourceless is not None and sourceless.preview_url is None
 
 
 def test_to_artifact_meta_populates_citation_for_reference(monkeypatch):
@@ -271,61 +272,62 @@ def test_content_404_when_in_catalog_but_no_content(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# GET /api/conversations/{cid}/artifacts/{aid}/mesh
+# GET /api/conversations/{cid}/artifacts/{aid}/preview
 # --------------------------------------------------------------------------- #
 
 _MESH_ART = {"artifact_id": "m1", "name": "t.exo", "mime_type": "application/x-exodus", "uri": "file:///t.exo"}
 
 
-def _stub_viewer_props(monkeypatch, result):
+def _stub_preview_props(monkeypatch, result):
     calls = []
 
-    async def _props(artifact):
-        calls.append(artifact)
+    async def _props(previewer, artifact):
+        calls.append((previewer.name, artifact))
         if isinstance(result, Exception):
             raise result
         return result
 
-    monkeypatch.setattr(artifacts_router, "mesh_viewer_props", _props)
+    monkeypatch.setattr(artifacts_router, "preview_props", _props)
     return calls
 
 
-def test_mesh_props_route_returns_viewer_props(monkeypatch):
-    calls = _stub_viewer_props(monkeypatch, {"datasetId": "ds1", "baseUrl": "/api/artifacts/mesh/ds1"})
+def test_preview_route_returns_viewer_props(monkeypatch):
+    calls = _stub_preview_props(monkeypatch, {"manifest": {}, "baseUrl": "/api/previews/k1"})
     client = _authed_client(monkeypatch, artifacts=[_MESH_ART])
-    resp = client.get("/api/conversations/c1/artifacts/m1/mesh")
+    resp = client.get("/api/conversations/c1/artifacts/m1/preview")
     assert resp.status_code == 200
-    assert resp.json()["datasetId"] == "ds1"
+    assert resp.json()["baseUrl"] == "/api/previews/k1"
     assert "immutable" in resp.headers["cache-control"]
-    assert calls[0]["uri"] == "file:///t.exo"  # handed the catalog entry
+    assert calls[0][0] == "mesh"  # the registry picked the mesh previewer…
+    assert calls[0][1]["uri"] == "file:///t.exo"  # …and handed it the catalog entry
 
 
-def test_mesh_props_route_404_for_non_mesh(monkeypatch):
-    calls = _stub_viewer_props(monkeypatch, {})
-    client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "p1", "name": "r.pdf"}])
-    assert client.get("/api/conversations/c1/artifacts/p1/mesh").status_code == 404
+def test_preview_route_404_without_a_previewer(monkeypatch):
+    calls = _stub_preview_props(monkeypatch, {})
+    client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "p1", "name": "r.pdf", "uri": "file:///r.pdf"}])
+    assert client.get("/api/conversations/c1/artifacts/p1/preview").status_code == 404
     assert not calls
 
 
-def test_mesh_props_route_404_for_conversation_owned_by_someone_else(monkeypatch):
-    calls = _stub_viewer_props(monkeypatch, {})
+def test_preview_route_404_for_conversation_owned_by_someone_else(monkeypatch):
+    calls = _stub_preview_props(monkeypatch, {})
     client = _authed_client(monkeypatch, artifacts=[_MESH_ART], owner="bob")
-    assert client.get("/api/conversations/c1/artifacts/m1/mesh").status_code == 404
+    assert client.get("/api/conversations/c1/artifacts/m1/preview").status_code == 404
     assert not calls
 
 
 @pytest.mark.parametrize(
     "error,status",
     [
-        (mesh_service.MeshUnavailable("gone"), 502),
-        (ConverterError("not exodus"), 422),
+        (PreviewUnavailable("gone"), 502),
+        (PreviewUnreadable("not exodus"), 422),
         (RuntimeError("boom"), 500),
     ],
 )
-def test_mesh_props_route_maps_failures(monkeypatch, error, status):
-    _stub_viewer_props(monkeypatch, error)
+def test_preview_route_maps_failures(monkeypatch, error, status):
+    _stub_preview_props(monkeypatch, error)
     client = _authed_client(monkeypatch, artifacts=[_MESH_ART])
-    assert client.get("/api/conversations/c1/artifacts/m1/mesh").status_code == status
+    assert client.get("/api/conversations/c1/artifacts/m1/preview").status_code == status
 
 
 # --------------------------------------------------------------------------- #

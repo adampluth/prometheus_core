@@ -16,11 +16,11 @@
  *   - report/reference → dedicated lightweight viewers (markdown / citation card).
  *
  * Notes:
- *   - **mesh**: always a `MeshViewer` custom element. Its props carry `meshUrl` (the
- *     artifact's `mesh_url`), which the element fetches only once scrolled into view —
- *     the backend converts Exodus/STL → VTP on that first request and caches it — plus
- *     `downloadUrl` for the raw file if conversion fails. An inline VTP manifest in
- *     `json_body`, if an agent ever sends one, is used as-is.
+ *   - **previews**: when the backend has a previewer for an artifact (today: meshes,
+ *     Exodus/STL → VTP) it sends a `preview_url`. The element then carries
+ *     `previewUrl` + `downloadUrl`, and `ElementRenderer` fetches the preview's props
+ *     once the viewer scrolls into view and merges them into the element — so no
+ *     viewer, and nothing here, is special-cased for it.
  *   - **mermaid**: no agent currently emits mermaid artifacts, and the diagram source
  *     is not a wire field. We extract it best-effort from `json_body`; an empty source
  *     surfaces the viewer's own "no diagram" state.
@@ -41,15 +41,6 @@ function mermaidSource(body: unknown): string {
   return "";
 }
 
-/** A mesh body is renderable only if it carries the VTP manifest the MeshViewer needs. */
-function meshManifestProps(body: unknown): Record<string, unknown> | null {
-  if (body && typeof body === "object") {
-    const o = body as Record<string, unknown>;
-    if (o.baseUrl || o.manifest || o.datasetId) return o;
-  }
-  return null;
-}
-
 /** Convert one wire artifact into a viewer-ready element. */
 export function artifactToElement(artifact: ArtifactMeta): AnyElement {
   const element = buildElement(artifact);
@@ -57,7 +48,11 @@ export function artifactToElement(artifact: ArtifactMeta): AnyElement {
   // `resourceSignature` derives a custom element's identity from `props.artifact_id`
   // (among others), and several viewers carry no other distinguishing prop — without
   // this, two IFC/mermaid/report artifacts sharing a component name would collapse to one.
-  element.props = { ...(element.props ?? {}), artifact_id: artifact.artifact_id };
+  element.props = {
+    ...(element.props ?? {}),
+    artifact_id: artifact.artifact_id,
+    ...(artifact.preview_url ? { previewUrl: artifact.preview_url, downloadUrl: artifact.content_url } : {}),
+  };
   return element;
 }
 
@@ -89,12 +84,8 @@ function buildElement(artifact: ArtifactMeta): AnyElement {
         ...base,
         type: "custom",
         name: "MeshViewer",
-        props: {
-          ...meshManifestProps(artifact.json_body),
-          meshUrl: artifact.mesh_url ?? undefined,
-          downloadUrl: url,
-          title: artifact.name || "Mesh Viewer",
-        },
+        // The dataset (manifest, baseUrl, …) comes from the artifact's preview.
+        props: { title: artifact.name || "Mesh Viewer" },
       };
 
     case "mermaid":

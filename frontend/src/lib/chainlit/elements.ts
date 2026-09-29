@@ -169,6 +169,11 @@ import { ThermalAnalysisElement }          from "../../viewers/ThermalAnalysisEl
 import { ReportElement }                   from "../../viewers/ReportElement";
 import { ReferenceElement }                from "../../viewers/ReferenceElement";
 
+// Viewers that hold a WebGL context and GPU buffers while mounted (browsers cap live
+// contexts at ~16). ElementRenderer mounts these only near the viewport and unmounts
+// them once far away; their engines dispose on unmount.
+export const DEFERRED_KINDS: ReadonlySet<ElementKind> = new Set<ElementKind>(["ifc", "mesh"]);
+
 export const VIEWER_REGISTRY: Partial<Record<ElementKind, ViewerComponent | null>> = {
   ifc:          IFCViewerElement,
   mesh:         MeshViewerElement, // wired and live — see notes above

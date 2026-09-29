@@ -52,7 +52,7 @@ volumes:
   valkey-data:
   litellm-db-data:
   admin-db-data:
-  mesh-cache:
+  preview-cache:
 
 services:
 
@@ -210,12 +210,12 @@ services:
       # configured -- must exactly match that provider's registered redirect
       # URI. See .env.example and docs/dev-docs/multi-user-setup.md.
       BACKEND_PUBLIC_URL: ${BACKEND_PUBLIC_URL:-}
-      # Exodus/STL -> VTP conversions, reused across restarts (conversion of a
-      # large mesh can take minutes; see backend/app/services/mesh/service.py).
-      PROMETHEUS_MESH_CACHE_DIR: /var/cache/prometheus/mesh
-    volumes:  # *common-volumes plus the mesh cache (a YAML alias can't be extended)
+      # Built artifact previews (e.g. Exodus/STL -> VTP), reused across restarts
+      # (a large mesh can take minutes; see backend/app/services/previews/).
+      PROMETHEUS_PREVIEW_CACHE_DIR: /var/cache/prometheus/previews
+    volumes:  # *common-volumes plus the preview cache (a YAML alias can't be extended)
       - ./shared:/app/shared
-      - mesh-cache:/var/cache/prometheus/mesh
+      - preview-cache:/var/cache/prometheus/previews
     depends_on:
       redis:
         condition: service_started

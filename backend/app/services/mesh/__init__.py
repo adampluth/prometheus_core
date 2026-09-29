@@ -10,8 +10,9 @@ Layout:
   - ``models`` / ``cache`` / ``exceptions`` — vtk-free leaf modules (safe to import
     anywhere; used by the app-facing service and tests).
   - ``vtk_pipeline`` / ``stl`` / ``converter`` — the VTK-dependent conversion library
-    (``import vtk``). Imported lazily by :mod:`service` so the app (and the offline
+    (``import vtk``). Imported lazily by :mod:`preview` so the app (and the offline
     test suite) never pulls VTK just to mount the router.
-  - ``service`` — the app-facing on-demand conversion (``mesh_viewer_props``) plus
-    the cache-root/URL helpers the artifacts router shares.
+  - ``preview`` — the mesh :class:`~app.services.previews.Previewer`. Fetching,
+    caching, and serving the converted files is the generic preview service's job
+    (``app/services/previews``); nothing else in the app knows about meshes.
 """

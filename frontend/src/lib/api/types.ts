@@ -85,9 +85,10 @@ export interface ArtifactMeta {
   /** Bytes for this artifact (`/api/conversations/{id}/artifacts/{aid}/content`);
    * used directly as an <img>/<embed> src or fetch target. */
   content_url: string;
-  /** Mesh artifacts only (`…/{aid}/mesh`): MeshViewer props, converted on first
-   * request — fetched lazily once the viewer scrolls into view. */
-  mesh_url?: string | null;
+  /** Set when the artifact's viewer needs a backend-built preview
+   * (`…/{aid}/preview`): viewer props, built on first request — fetched lazily once
+   * the viewer scrolls into view. */
+  preview_url?: string | null;
   citation?: Citation | null;
   producer_agent_id?: string | null;
   created_at?: string | null;
@@ -295,6 +296,8 @@ export interface ConversationMessage {
   role: "user" | "assistant";
   content: string;
   timestamp: string;
+  /** Artifacts this turn produced (assistant turns; attributed server-side). */
+  artifacts: ArtifactMeta[];
 }
 
 export interface ConversationDetailResponse {
@@ -303,5 +306,4 @@ export interface ConversationDetailResponse {
   profile: string;
   auto_approve_steps: boolean;
   messages: ConversationMessage[];
-  artifacts: ArtifactMeta[];
 }

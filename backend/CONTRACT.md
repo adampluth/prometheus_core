@@ -186,7 +186,7 @@ One model covers every `status`; only the status-relevant fields are populated.
       "json_body": null,
       "render_hint": "mesh",
       "content_url": "/api/conversations/c-8f2a…/artifacts/art-9/content",
-      "mesh_url": "/api/conversations/c-8f2a…/artifacts/art-9/mesh",
+      "preview_url": "/api/conversations/c-8f2a…/artifacts/art-9/preview",
       "producer_agent_id": "thermal-agent",
       "created_at": "2026-08-10T12:00:00Z"
     }
@@ -326,36 +326,43 @@ id isn't in its catalog (same non-disclosure rule as the history routes). Artifa
 ids name immutable content, so responses carry
 `Cache-Control: private, max-age=604800, immutable`.
 
-## `GET /api/conversations/{conversation_id}/artifacts/{artifact_id}/mesh`
+## `GET /api/conversations/{conversation_id}/artifacts/{artifact_id}/preview`
 
-MeshViewer props for a `render_hint: "mesh"` artifact (Exodus / STL), carried as
-`mesh_url` on its `ArtifactMeta` (`null` for every other kind). Same access check
-and 404 rule as `/content`; also **404** for a non-mesh artifact.
+Viewer props for an artifact that needs a processed rendition before it can be
+shown (today: Exodus/STL meshes → `.vtp` for the MeshViewer). Carried as
+`preview_url` on its `ArtifactMeta` whenever a backend *previewer* applies to the
+artifact (`backend/app/services/previews/registry.py`), `null` otherwise. Same
+access check and 404 rule as `/content`; also **404** when no previewer applies.
+
+The body is whatever the previewer produced, plus `baseUrl` for its files; the
+frontend merges it under the element's own props. For a mesh:
 
 ```json
 {
-  "manifest": { "timesteps": [ … ] },
-  "baseUrl": "/api/artifacts/mesh/3f9c…",
+  "manifest": { "files": [ … ], "variables": { … } },
   "metadata": { … },
-  "title": "temperature_field.e"
+  "initialVariable": "temperature",
+  "baseUrl": "/api/previews/3f9c…"
 }
 ```
 
-Nothing is converted up front — not during a turn, not when a conversation is
+Nothing is built up front — not during a turn, not when a conversation is
 reopened. The frontend requests this only once the viewer scrolls into view. The
-first request for a given source downloads and converts it to `.vtp` (can take a
-while for large Exodus files; concurrent requests share one conversion); later
-requests read the persistent conversion cache (`PROMETHEUS_MESH_CACHE_DIR`) without
-touching the source. **502** when the source can't be fetched, **422** when it isn't
-a readable mesh, **500** on any other conversion failure — the viewer shows the
-error with a download link to `content_url`. Cached like `/content`.
+first request for a given source downloads it and builds the preview (can take a
+while for a large Exodus file; concurrent requests share one build); later
+requests read the persistent preview cache (`PROMETHEUS_PREVIEW_CACHE_DIR`) without
+touching the source. The cache key hashes the previewer's name + version and the
+artifact URI, so bumping a previewer's version rebuilds its previews. **502** when
+the source can't be fetched, **422** when the previewer can't read it, **500** on
+any other failure — the viewer shows the error with a download link to
+`content_url`. Cached like `/content`.
 
-## `GET /api/artifacts/mesh/{dataset_id}/{filename}`
+## `GET /api/previews/{key}/{filename}`
 
-The converted `.vtp` timesteps the MeshViewer fetches as `${baseUrl}/${filename}`.
-Auth-required; `dataset_id` is a content hash, so there is no per-conversation
-check. Both segments must be single names not starting with `.`. Immutable and
-cached like `/content`.
+A built preview's files, fetched by its viewer as `${baseUrl}/${filename}`.
+Auth-required; `key` is derived from the source URI, so there is no
+per-conversation check. Both segments must be single names not starting with `.`.
+Immutable and cached like `/content`.
 
 ## Chat history
 
@@ -398,8 +405,11 @@ currently viewing may still have work in flight.
 ### `GET /api/conversations/{id}` → `ConversationDetailResponse`
 
 A past conversation's normalized transcript (`conversation_history` filtered
-to `role: user|assistant` turns) plus its artifact catalog, shaped the same way
-a live turn's `artifacts` are.
+to `role: user|assistant` turns). Its artifact catalog is shaped the same way a
+live turn's `artifacts` are and attached to the assistant message that produced
+each artifact — the first reply whose `timestamp` is at or after the artifact's
+`created_at`, else the last reply (a transcript with no reply gets an empty one to
+carry them). Every message has `artifacts` (empty for user turns).
 
 ```json
 {
@@ -408,10 +418,9 @@ a live turn's `artifacts` are.
   "profile": "",
   "auto_approve_steps": false,
   "messages": [
-    { "role": "user", "content": "What is the corrosion rate of SS316 in seawater?", "timestamp": "…" },
-    { "role": "assistant", "content": "## Corrosion Analysis\n…", "timestamp": "…" }
-  ],
-  "artifacts": []
+    { "role": "user", "content": "What is the corrosion rate of SS316 in seawater?", "timestamp": "…", "artifacts": [] },
+    { "role": "assistant", "content": "## Corrosion Analysis\n…", "timestamp": "…", "artifacts": [ … ] }
+  ]
 }
 ```
 
