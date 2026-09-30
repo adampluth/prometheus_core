@@ -53,14 +53,13 @@ class _FakeJWKClient:
 def _client(monkeypatch, *, idp_public_pem: str | None = None) -> TestClient:
     from app import security
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
-    monkeypatch.setattr(security.settings, "debug", True, raising=False)  # cookies replay over http in TestClient
+    # cookies replay over http in TestClient only if not marked Secure
+    monkeypatch.setattr(security.settings, "cookie_secure", False, raising=False)
     monkeypatch.setattr(oidc, "fetch_discovery", _fake_fetch_discovery)
     if idp_public_pem is not None:
         monkeypatch.setattr(oidc, "PyJWKClient", lambda jwks_uri: _FakeJWKClient(jwks_uri, idp_public_pem))
-    app.state.session_store = SessionStore()
     return TestClient(app)
 
 

@@ -1,7 +1,7 @@
 /**
  * src/components/ElementRenderer.tsx
  *
- * Dispatches a Chainlit element to the right viewer, or shows a fallback.
+ * Dispatches an element to the right viewer, or shows a fallback.
  *
  * Usage — inside the assistant message block in Chat.tsx:
  *
@@ -9,10 +9,8 @@
  *
  * Also add to Chat.tsx imports:
  *   import { ElementList } from "./ElementRenderer";
- *   import type { AnyElement } from "../lib/chainlit/elements";
+ *   import type { AnyElement } from "../lib/elements/elements";
  *
- * Also add to IStepExtended in chainlit.ts:
- *   elements?: AnyElement[];
  */
 
 import { Component, Suspense } from "react";
@@ -23,11 +21,11 @@ import {
   VIEWER_REGISTRY,
   type AnyElement,
   type ViewerProps,
-} from "../lib/chainlit/elements";
+} from "../lib/elements/elements";
 import {
   dedupeElements,
   elementKey,
-} from "../lib/chainlit/elementDeduplication";
+} from "../lib/elements/elementDeduplication";
 import { NoViewerFallback } from "../viewers/FileDownloadElement";
 import { DeferredViewer } from "./DeferredViewer";
 

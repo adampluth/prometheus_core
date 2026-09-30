@@ -8,7 +8,7 @@ knows nothing about any particular kind:
 - ``registry`` lists the previewers and picks the one (if any) for an artifact.
   ``ArtifactMeta.preview_url`` is set exactly when one applies.
 - ``service`` builds a preview the first time it is asked for (download the source,
-  run the previewer off the event loop), caches the result on disk, and dedupes
+  run the previewer in a subprocess pool), caches the result on disk, and dedupes
   concurrent requests. Everything cached is served back by one generic file route.
 
 Adding a previewer means writing a :class:`Previewer` and adding it to
@@ -16,6 +16,6 @@ Adding a previewer means writing a :class:`Previewer` and adding it to
 loading all come for free.
 """
 
-from .base import Previewer, PreviewUnavailable, PreviewUnreadable
+from .base import PreviewFailed, Previewer, PreviewUnavailable, PreviewUnreadable
 
-__all__ = ["Previewer", "PreviewUnavailable", "PreviewUnreadable"]
+__all__ = ["PreviewFailed", "Previewer", "PreviewUnavailable", "PreviewUnreadable"]

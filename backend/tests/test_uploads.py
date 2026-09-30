@@ -17,12 +17,10 @@ def _authed_client(monkeypatch) -> TestClient:
     from app import security
     from app.config import settings
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
 
-    app.state.session_store = SessionStore()
     token = security.issue_token(security.User(identifier="alice"), sid="sid-upload")
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
@@ -54,9 +52,7 @@ def test_guess_upload_mime_falls_back_to_octet_stream():
 
 def test_uploads_requires_auth():
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     client = TestClient(app)
     resp = client.post("/api/uploads", files={"file": ("f.txt", b"hi", "text/plain")})
     assert resp.status_code == 401

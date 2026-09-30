@@ -25,15 +25,23 @@ from app.a2a_client import ConversationResponse, ConversationStatus
 from app.contract import ChatStatus
 from app.services import chat as chat_service
 from app.services.artifacts import to_artifact_meta
-from app.sessions import SessionState
+from app.sessions import SessionStore
+
+SID = "sid-1"
 
 
 def _resp(**kwargs) -> ConversationResponse:
     return ConversationResponse.from_payload({"conversation_id": "c1", **kwargs})
 
 
-def _session() -> SessionState:
-    return SessionState(sid="sid-1", conversation_id="c1")
+async def _seed(store: SessionStore) -> None:
+    """Bind the session to a conversation in Valkey.
+
+    ``map_response`` reads and writes session state through the store now, so the
+    mapping tests need a real (fake-Valkey-backed) session rather than a constructed
+    ``SessionState`` — that type is a frozen snapshot.
+    """
+    await store.reset(SID, "c1")
 
 
 # --------------------------------------------------------------------------- #
@@ -70,14 +78,17 @@ _STATUS_PAYLOADS = {
 
 
 @pytest.mark.parametrize("source_status", ConversationStatus.values())
-def test_map_response_handles_every_status(source_status):
+async def test_map_response_handles_every_status(source_status, session_store):
     """Each upstream status maps 1:1 to the same ``ChatStatus`` and round-trips.
 
     Guarantees the backend never lets a valid ``ConversationStatus`` fall through to
     the unknown-status fallback (which would silently relabel it ``answer``).
     """
+    await _seed(session_store)
     response = _resp(status=source_status, **_STATUS_PAYLOADS[source_status])
-    mapped = chat_service.map_response(response, "turn-1", _session(), conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "turn-1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
 
     assert mapped.turn_id == "turn-1"
     # use_enum_values=True → status is the string value; must equal the source status.
@@ -88,9 +99,12 @@ def test_map_response_handles_every_status(source_status):
 
 
 @pytest.mark.parametrize("source_status", ConversationStatus.values())
-def test_map_response_handles_bare_payload(source_status):
+async def test_map_response_handles_bare_payload(source_status, session_store):
     """Even a status-only response (no optional fields) maps without raising."""
-    mapped = chat_service.map_response(_resp(status=source_status), "t", _session(), conversation_id="c1", auto_approve=False)
+    await _seed(session_store)
+    mapped = await chat_service.map_response(
+        _resp(status=source_status), "t", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped.status == source_status
 
 
@@ -105,7 +119,7 @@ def test_upstream_status_enum_rejects_unknown_values():
         _resp(status="some_future_status")
 
 
-def test_map_response_unknown_status_collapses_to_answer_not_500():
+async def test_map_response_unknown_status_collapses_to_answer_not_500(session_store):
     """Belt-and-suspenders: the defensive ``else`` branch degrades, never 500s.
 
     The enum above makes this unreachable for a real parsed response, but
@@ -115,8 +129,9 @@ def test_map_response_unknown_status_collapses_to_answer_not_500():
     """
     from types import SimpleNamespace
 
+    await _seed(session_store)
     stub = SimpleNamespace(status="some_future_status", message="hi", response_text="body")
-    mapped = chat_service.map_response(stub, "t", _session(), conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(stub, "t", session_store, SID, conversation_id="c1", auto_approve=False)
     assert mapped.status == ChatStatus.ANSWER.value
     assert mapped.response_text == "body"
 

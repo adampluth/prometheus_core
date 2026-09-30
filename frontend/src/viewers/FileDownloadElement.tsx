@@ -1,6 +1,6 @@
 import { FileDown } from "lucide-react";
-import type { AnyElement, ViewerProps } from "../lib/chainlit/elements";
-import { artifactFilePresentation } from "../lib/chainlit/artifactPresentation";
+import type { AnyElement, ViewerProps } from "../lib/elements/elements";
+import { artifactFilePresentation } from "../lib/elements/artifactPresentation";
 
 /**
  * Shared artifact-label + download-button card. Two callers, one markup:
@@ -35,7 +35,7 @@ function FileCard({ element, subtitle }: { element: AnyElement; subtitle?: strin
   );
 }
 
-/** cl.File elements with no dedicated viewer — closes priority-1 in the chainlit.ts artifact-viewers TODO. */
+/** File elements with no dedicated viewer — the generic download fallback. */
 export function FileDownloadElement({ element }: ViewerProps) {
   return <FileCard element={element} />;
 }

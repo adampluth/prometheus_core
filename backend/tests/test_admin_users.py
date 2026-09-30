@@ -12,12 +12,8 @@ from fastapi.testclient import TestClient
 def _client_as(monkeypatch, wire_db_session, *, role: str, sid: str) -> TestClient:
     from app import security
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
-    store = SessionStore()
-    store.get_or_create(sid)
-    app.state.session_store = store
     token = security.issue_token(security.User(identifier=f"{role}-{sid}", role=role), sid=sid)
     client = TestClient(app)
     client.cookies.set("prometheus_session", token)
@@ -43,9 +39,7 @@ async def _seed_admin(wire_db_session, *, username: str = "root", role: str = "a
 
 def test_unauthenticated_gets_401(wire_db_session):
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     assert TestClient(app).get("/api/admin/users").status_code == 401
 
 

@@ -10,7 +10,6 @@ This agent:
 
 import json
 import os
-import sys
 import uuid
 import logging
 import re
@@ -23,9 +22,6 @@ from prometheus_api.llm_client import LLMConfig
 from prometheus_api.redis_utils import create_redis_client
 from a2a.server.agent_execution.context import RequestContext
 from a2a.server.events import EventQueue
-
-# Add shared directory to path
-sys.path.insert(0, "/app")
 
 # Configure logging
 logging.basicConfig(

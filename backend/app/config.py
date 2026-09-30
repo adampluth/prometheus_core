@@ -43,8 +43,8 @@ def get_max_upload_bytes(data: dict[str, Any]) -> int:
 
 
 def _jwt_secret(data: dict[str, Any]) -> str:
-    # Prefer a dedicated secret, then reuse Chainlit's, then the config file value.
-    return os.environ.get("BACKEND_JWT_SECRET") or os.environ.get("CHAINLIT_AUTH_SECRET") or data.get("jwt-secret", "")
+    # Prefer the env secret, then the config file value.
+    return os.environ.get("BACKEND_JWT_SECRET") or data.get("jwt-secret", "")
 
 
 def _dev_cors_origins() -> list[str]:
@@ -85,6 +85,34 @@ def _redis_url(data: dict[str, Any]) -> str:
     return url
 
 
+def _cookie_secure(data: dict) -> bool:
+    """Whether to mark auth cookies ``Secure``, derived from the browser-facing scheme.
+
+    This used to be ``not settings.debug``, which is wrong for the default dev
+    setup: ``debug`` is ``false`` in ``config.yml`` while ``BACKEND_PUBLIC_URL`` is
+    ``http://localhost:5150``, so the cookie went out marked ``Secure`` over plain
+    http. Chrome and Firefox special-case ``http://localhost`` and keep it anyway;
+    **Safari does not**, and no browser keeps it for ``http://<LAN-IP>:5150``. The
+    cookie is then dropped silently, every ``/api`` call 401s, and the UI bounces to
+    Login with nothing to explain it.
+
+    ``BACKEND_COOKIE_SECURE`` / ``cookie-secure`` wins if set (needed when the
+    browser-facing scheme is https but this process cannot know it -- e.g. TLS
+    terminated by an ingress that does not set ``BACKEND_PUBLIC_URL``). Otherwise
+    the scheme of ``BACKEND_PUBLIC_URL`` decides. With no public URL configured
+    there is nothing to derive from, so the old ``not debug`` behaviour stands.
+    """
+    raw = os.environ.get("BACKEND_COOKIE_SECURE", data.get("cookie-secure"))
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+    public = os.environ.get("BACKEND_PUBLIC_URL", "").strip().lower()
+    if public.startswith("https://"):
+        return True
+    if public.startswith("http://"):
+        return False
+    return not bool(data.get("debug", False))
+
+
 class Settings(BaseSettings):
     data: dict[str, Any] = read_config(CONFIG_PATH)
 
@@ -103,7 +131,22 @@ class Settings(BaseSettings):
 
     # Built artifact previews (e.g. meshes converted to VTP), see services/previews.
     # Empty = <tempdir>/prometheus-previews. Overridden by env PROMETHEUS_PREVIEW_CACHE_DIR.
+    # Should point at a persistent volume: a preview is never rebuilt while it is kept.
     preview_cache_dir: str = os.environ.get("PROMETHEUS_PREVIEW_CACHE_DIR", data.get("preview-cache-dir", ""))
+    # Size of the preview-build subprocess pool (app/services/previews/service.py).
+    # NOTE FOR OPERATORS: this is *per web worker*. Running uvicorn with --workers N
+    # gives N × preview_workers build children at peak, so size the container memory
+    # limit against that product, not against this number alone.
+    preview_workers: int = _positive_int(
+        os.environ.get("PROMETHEUS_PREVIEW_WORKERS", data.get("preview-workers", 2)),
+        "preview-workers",
+    )
+    # Wall-clock budget for building one preview. On expiry the build's worker is
+    # killed and the viewer shows the error with a retry / download fallback.
+    preview_timeout_seconds: int = _positive_int(
+        os.environ.get("PROMETHEUS_PREVIEW_TIMEOUT_SECONDS", data.get("preview-timeout-seconds", 300)),
+        "preview-timeout-seconds",
+    )
 
     # Behavior
     debug: bool = data.get("debug", False)
@@ -113,6 +156,8 @@ class Settings(BaseSettings):
     # Auth / session
     jwt_secret: str = _jwt_secret(data)
     cookie_name: str = os.environ.get("BACKEND_COOKIE_NAME", data.get("cookie-name", "prometheus_session"))
+    # See _cookie_secure: gated on the browser-facing scheme, not on `debug`.
+    cookie_secure: bool = _cookie_secure(data)
     token_ttl_seconds: int = _positive_int(
         os.environ.get("BACKEND_TOKEN_TTL_SECONDS", data.get("token-ttl-seconds", 86400)),
         "token-ttl-seconds",

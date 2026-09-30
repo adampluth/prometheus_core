@@ -18,7 +18,7 @@
  * original plugin.
  */
 
-import type { ViewerProps } from "../lib/chainlit/elements";
+import type { ViewerProps } from "../lib/elements/elements";
 
 // ---------------------------------------------------------------------------
 // Formatting helpers

@@ -14,7 +14,13 @@ name immutable content (DeepLynx items, per-upload staged files), so a built pre
 never goes stale and a hit needs no download. A preview is built in a dot-prefixed
 scratch directory and renamed into place, so a half-built one is never visible (and
 the file route, which rejects dot-prefixed segments, can't reach the scratch
-directories). Concurrent requests for the same preview share one build.
+directories). Concurrent requests for the same preview share one build within a web
+worker; with ``BACKEND_WORKERS`` > 1 two workers may both build a cold preview, and
+the second rename simply loses (``worker.build_preview``) — wasted work, never a
+corrupt preview.
+
+Builds run in a subprocess pool (``pool.py``) so a previewer that crashes or runs out
+of memory fails one preview instead of taking the web process with it.
 
 Point ``PROMETHEUS_PREVIEW_CACHE_DIR`` at a persistent volume (``docker-compose.yml``
 does) so previews survive restarts.
@@ -24,38 +30,24 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import os
 import shutil
 import tempfile
-import uuid
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from app import uri_resolver
 from app.config import settings
 from app.services.artifacts import artifact_identity
 
+from . import pool
 from .base import Previewer, PreviewUnavailable
+from .worker import read_props
 
 logger = logging.getLogger(__name__)
 
 # Where the file route is mounted; a preview's baseUrl is f"{PREVIEW_FILES_PREFIX}/{key}".
 PREVIEW_FILES_PREFIX = "/api/previews"
-
-_PROPS_FILE = "preview.json"
-
-# Builds are CPU- and memory-heavy (VTK on a large mesh), so keep the pool small.
-_build_executor: Optional[ThreadPoolExecutor] = None
-
-
-def _executor() -> ThreadPoolExecutor:
-    global _build_executor
-    if _build_executor is None:
-        _build_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="preview-")
-    return _build_executor
 
 
 def preview_root() -> Path:
@@ -74,30 +66,6 @@ def preview_key(previewer: Previewer, uri: str) -> str:
     return hashlib.sha256(f"{previewer.name}|{previewer.version}|{uri}".encode()).hexdigest()[:32]
 
 
-def _read_props(preview_dir: Path) -> Optional[dict[str, Any]]:
-    try:
-        props = json.loads((preview_dir / _PROPS_FILE).read_text())
-    except (OSError, ValueError):
-        return None
-    return props if isinstance(props, dict) else None
-
-
-def _build_sync(previewer: Previewer, source: Path, artifact: dict[str, Any], root: Path, key: str) -> None:
-    """Build into a scratch directory, then rename it into place (worker thread)."""
-    scratch = root / f".build-{key}-{uuid.uuid4().hex[:8]}"
-    scratch.mkdir()
-    try:
-        props = previewer.build(source, artifact, scratch)
-        (scratch / _PROPS_FILE).write_text(json.dumps(props))
-        final = root / key
-        if final.exists():
-            # Left over from a build whose props file is gone (pruned by hand).
-            shutil.rmtree(final, ignore_errors=True)
-        os.rename(scratch, final)
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
 async def _resolve_and_build(previewer: Previewer, artifact: dict[str, Any], uri: str, root: Path, key: str) -> None:
     download_dir = Path(tempfile.mkdtemp(prefix="preview-src-"))
     try:
@@ -106,8 +74,7 @@ async def _resolve_and_build(previewer: Previewer, artifact: dict[str, Any], uri
         )
         if source is None or not source.exists():
             raise PreviewUnavailable(f"could not resolve {uri!r}")
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(_executor(), _build_sync, previewer, source, artifact, root, key)
+        await pool.run_build(previewer, source, artifact, root, key)
     finally:
         # A file:// source resolves to the original path (outside download_dir), so
         # this only removes http(s)/deeplynx downloads.
@@ -123,7 +90,8 @@ _in_flight: dict[str, asyncio.Task[None]] = {}
 async def preview_props(previewer: Previewer, artifact: dict[str, Any]) -> dict[str, Any]:
     """The viewer props for ``artifact``'s preview, building it on first request.
 
-    Raises :class:`PreviewUnavailable` when the source can't be fetched; errors from
+    Raises :class:`PreviewUnavailable` when the source can't be fetched and
+    :class:`PreviewFailed` when the build process crashed or timed out; errors from
     the previewer itself (:class:`PreviewUnreadable`, or anything unexpected)
     propagate for the router to map.
     """
@@ -133,7 +101,7 @@ async def preview_props(previewer: Previewer, artifact: dict[str, Any]) -> dict[
     root = preview_root()
     key = preview_key(previewer, uri)
 
-    props = _read_props(root / key)
+    props = read_props(root / key)
     if props is None:
         task = _in_flight.get(key)
         if task is None:
@@ -141,7 +109,7 @@ async def preview_props(previewer: Previewer, artifact: dict[str, Any]) -> dict[
             _in_flight[key] = task
             task.add_done_callback(lambda _t: _in_flight.pop(key, None))
         await asyncio.shield(task)
-        props = _read_props(root / key)
+        props = read_props(root / key)
         if props is None:
             raise PreviewUnavailable(f"preview {key} is missing its props after building")
     return {**props, "baseUrl": f"{PREVIEW_FILES_PREFIX}/{key}"}

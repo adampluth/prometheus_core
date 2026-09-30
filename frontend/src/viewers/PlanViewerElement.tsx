@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 
 interface PlanStepObject {
   name?: string;

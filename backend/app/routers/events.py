@@ -23,14 +23,15 @@ import asyncio
 import logging
 from typing import AsyncIterator, cast
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
 from app.contract import ServerEvent
+from app.redis_client import RedisClient, get_redis
 from app.security import TokenClaims, current_claims
-from app.services.events import EventBus, run_task_subscriber
-from app.sessions import SessionState, SessionStore
+from app.services.events import EventBus, StreamItem, run_task_subscriber
+from app.sessions import SessionStore, get_store
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,6 @@ router = APIRouter(prefix="/api", tags=["events"])
 # Idle heartbeat cadence (seconds). Sent as an SSE comment when no real event
 # arrives within the window, so the connection survives idle turns.
 _HEARTBEAT_SECONDS = 15.0
-
-
-def _get_store(request: Request) -> SessionStore:
-    return cast(SessionStore, request.app.state.session_store)
 
 
 def _get_event_bus(request: Request) -> EventBus:
@@ -61,29 +58,41 @@ def _sse_frame(event: ServerEvent) -> str:
 async def _event_stream(
     request: Request,
     bus: EventBus,
-    session: SessionState,
+    store: SessionStore,
+    sid: str,
+    redis: RedisClient,
+    queue: "asyncio.Queue[StreamItem]",
 ) -> AsyncIterator[str]:
-    """Drain the session's queue as SSE, heart-beating through idle gaps.
+    """Drain this connection's queue as SSE, heart-beating through idle gaps.
 
-    Registers a fresh bus queue for this connection, starts the background-task
-    Redis subscriber, and yields frames until the client disconnects — at which
-    point the subscriber is cancelled and the queue unregistered.
+    ``queue`` is registered by the route rather than here: ``bus.register`` awaits a
+    Valkey ``SUBSCRIBE``, and a failure there has to surface as a 503 on the request.
+    Once a ``StreamingResponse`` has been handed back, the status line is already
+    committed and the only way to report the failure is a stream that never yields.
+
+    Starts the background-task subscriber, then yields frames until the client
+    disconnects — at which point the subscriber is cancelled and the queue unregistered.
+    Also ends on the bus's ``None`` sentinel (this worker's Valkey relay for the sid
+    died): closing the response makes the browser's ``EventSource`` reconnect, and the
+    new request's ``register`` subscribes again.
     """
-    queue = bus.register(session.sid)
-    # One background-task subscriber per session, shared across connections/tabs (T-5):
-    # start it only for the first connection of this sid; the last to close cancels it.
-    # (Publishing fans out to every queue for the sid, so one subscriber feeds all tabs
-    # exactly once — two subscribers would duplicate every task_progress event.)
-    if bus.get_task_subscriber(session.sid) is None:
+    # One background-task subscriber per session *per worker*, shared across this
+    # worker's connections/tabs (T-5): start it only for the first connection of this
+    # sid; the last to close cancels it. A worker with tabs for this sid runs its own
+    # subscriber, so that subscriber's task_progress is delivered to this worker's queues
+    # only (EventBus.deliver_local) -- publishing it would reach every tab once per
+    # worker. task_done is published, deduplicated cluster-wide by claim_task.
+    if bus.get_task_subscriber(sid) is None:
         task = asyncio.create_task(
             run_task_subscriber(
                 bus,
-                session,
-                settings.redis_url,
+                store,
+                sid,
+                redis,
                 auto_approve=settings.auto_approve_steps,
             )
         )
-        bus.set_task_subscriber(session.sid, task)
+        bus.set_task_subscriber(sid, task)
     try:
         # Open the stream immediately so the client's EventSource fires `open`
         # before any real event (and so proxies flush the response headers).
@@ -96,13 +105,17 @@ async def _event_stream(
             except asyncio.TimeoutError:
                 yield ": ping\n\n"
                 continue
+            if event is None:
+                break  # relay died; let the client reconnect
             yield _sse_frame(event)
     finally:
-        bus.unregister(session.sid, queue)
-        # Tear the shared subscriber down only when this sid's last stream closes.
-        if bus.listener_count(session.sid) == 0:
-            subscriber = bus.get_task_subscriber(session.sid)
-            bus.clear_task_subscriber(session.sid)
+        await bus.unregister(sid, queue)
+        # Tear the shared subscriber down when this sid's last stream *on this worker*
+        # closes -- local_listener_count, not has_listeners: the subscriber and the
+        # pub/sub relay are both per-worker, and another worker's tabs have their own.
+        if bus.local_listener_count(sid) == 0:
+            subscriber = bus.get_task_subscriber(sid)
+            bus.clear_task_subscriber(sid)
             if subscriber is not None:
                 subscriber.cancel()
                 try:
@@ -117,12 +130,21 @@ async def events(
     claims: TokenClaims = Depends(current_claims),
 ) -> StreamingResponse:
     """Open the session's SSE stream. Auth-required; one per browser connection."""
-    store = _get_store(request)
-    session = store.get_or_create(claims.sid)
+    store = get_store(request)
     bus = _get_event_bus(request)
+    # Subscribe before the response is committed so a Valkey outage is a 503 the client
+    # can retry, not a stream that connects and then silently never delivers anything.
+    try:
+        queue = await bus.register(claims.sid)
+    except Exception as exc:  # noqa: BLE001 - reported to the client below
+        logger.warning("Could not open the event stream for sid=%s: %s", claims.sid, exc)
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Event stream is unavailable (state store unreachable).",
+        ) from exc
 
     return StreamingResponse(
-        _event_stream(request, bus, session),
+        _event_stream(request, bus, store, claims.sid, get_redis(request), queue),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

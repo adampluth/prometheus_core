@@ -4,11 +4,18 @@ Admin-plane tests (users, OIDC providers, signing keys) never touch a real
 Postgres -- ``db_session`` gives each test its own in-memory SQLite engine
 with the ORM schema created directly from ``Base.metadata`` (bypassing
 Alembic, which is the production migration path; see ``app/db.py``).
+
+Valkey-backed state (the session store, the SSE event bus, session revocation) is
+served by ``fakeredis`` rather than a container. ``valkey_state`` is autouse: every
+test gets ``app.state.redis`` / ``session_store`` / ``event_bus`` wired to a fresh
+in-memory instance, because a bare ``TestClient(app)`` does not run the lifespan that
+normally builds them. Ask for the ``session_store``, ``fake_redis`` or ``event_bus``
+fixture to reach the objects that were installed.
 """
 
 from __future__ import annotations
 
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Iterator
 
 import pytest
 import pytest_asyncio
@@ -16,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.db import Base
 from app.db import models  # noqa: F401  (registers models on Base.metadata)
+from app.sessions import SessionStore
 
 
 @pytest_asyncio.fixture
@@ -62,22 +70,6 @@ def admin_db_encryption_key(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "admin_db_encryption_key", Fernet.generate_key().decode())
-
-
-@pytest.fixture(autouse=True)
-def no_real_admin_db_migrations(monkeypatch):
-    """app.main.lifespan() runs Alembic against admin-db on every startup.
-
-    The test suite never has a live admin-db to migrate -- Alembic itself is
-    exercised manually (see docs/dev notes) and the ORM layer is exercised
-    against in-memory SQLite via ``db_session`` above. Stub the migration
-    step out so tests that invoke ``lifespan()`` directly (e.g. test_config.py's
-    BLK-3 guard tests) don't need a live Postgres. Tests that specifically
-    want to assert migrations run should monkeypatch this back themselves.
-    """
-    import app.main
-
-    monkeypatch.setattr(app.main, "_run_admin_db_migrations", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -128,3 +120,69 @@ def no_real_oidc_provider_registration(monkeypatch):
     yield
     security_mod._PROVIDERS.clear()
     security_mod._PROVIDERS[security_mod.password_provider.name] = security_mod.password_provider
+
+
+# --------------------------------------------------------------------------- #
+# Valkey-backed state (sessions, SSE event bus, revocation)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def valkey_server() -> Any:
+    """The in-memory datastore behind this test's Valkey clients.
+
+    Exposed separately from :func:`fake_redis` so a test can build a *second* client
+    over the same data (``FakeRedis(server=valkey_server, decode_responses=True)``) and
+    model two uvicorn workers against one Valkey -- which is how the cross-worker
+    pub/sub and shared-counter tests are written. Without an explicit server every
+    ``FakeRedis()`` is its own isolated instance.
+    """
+    from fakeredis import FakeServer
+
+    return FakeServer()
+
+
+@pytest.fixture
+def fake_redis(valkey_server: Any) -> Iterator[Any]:
+    """A fresh in-memory Valkey for one test, decoding to ``str``.
+
+    ``decode_responses=True`` matches ``app.redis_client.create_client``: the store
+    reads hash fields as ``str``, and a bytes-decoding fake would pass tests the real
+    client fails. The server is per-test, so state cannot leak between tests.
+    """
+    from fakeredis.aioredis import FakeRedis
+
+    # Not closed: the fake holds no socket, and aclose() is a coroutine this sync
+    # fixture has no loop to run.
+    yield FakeRedis(server=valkey_server, decode_responses=True)
+
+
+@pytest.fixture
+def session_store(fake_redis: Any) -> SessionStore:
+    """The :class:`SessionStore` installed on ``app.state`` for this test."""
+    return SessionStore(fake_redis)
+
+
+@pytest.fixture
+def event_bus(fake_redis: Any) -> Any:
+    """The :class:`~app.services.events.EventBus` installed on ``app.state``."""
+    from app.services.events import EventBus
+
+    return EventBus(fake_redis)
+
+
+@pytest.fixture(autouse=True)
+def valkey_state(fake_redis: Any, session_store: SessionStore, event_bus: Any) -> Iterator[None]:
+    """Install the Valkey-backed state objects on ``app.state`` for every test.
+
+    ``app/main.py``'s lifespan builds these, but ``TestClient(app)`` used bare (as most
+    of this suite does) never runs it -- so without this fixture ``get_redis`` and
+    ``get_store`` would raise ``AttributeError`` on the first authenticated request.
+    Autouse so a test only mentions these fixtures when it wants to inspect them.
+    """
+    from app.main import app
+
+    app.state.redis = fake_redis
+    app.state.session_store = session_store
+    app.state.event_bus = event_bus
+    yield

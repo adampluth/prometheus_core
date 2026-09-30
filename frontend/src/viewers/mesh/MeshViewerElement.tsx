@@ -29,7 +29,7 @@ import "./mesh.css";
 import MeshViewer, { MeshViewerHandles } from "./MeshViewer";
 import MeshViewerControls, { VariableOption } from "./MeshViewerControls";
 import type { ColorPreset, PickResult } from "./MeshViewerEngine";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 
 type MeshProps = {
   datasetId?: string;

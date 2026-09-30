@@ -18,7 +18,14 @@ export interface EventStreamHandlers {
   onTaskProgress?: (e: TaskProgressEvent) => void;
   onTaskDone?: (e: TaskDoneEvent) => void;
   onOpen?: () => void;
-  onError?: (err: Event) => void;
+  /** `closed` distinguishes the two very different things `EventSource` reports
+   * as the same `error` event: `false` means it is retrying on its own (a
+   * transport blip, a backend restart) and will recover; `true` means
+   * `readyState === CLOSED`, which it only reaches for a non-2xx response — the
+   * 401 from an expired session cookie, most often — and from which it never
+   * retries. Without this distinction the caller cannot tell "reconnecting" from
+   * "dead forever", and a dead stream looks exactly like an idle one. */
+  onError?: (info: { closed: boolean; event: Event }) => void;
 }
 
 /**
@@ -54,10 +61,15 @@ export function openEventStream(handlers: EventStreamHandlers): () => void {
   source.addEventListener("task_done", onTaskDone as EventListener);
   if (handlers.onOpen) source.addEventListener("open", handlers.onOpen);
   // EventSource fires `error` on transient disconnects too (it auto-reconnects);
-  // surface it but don't tear down — let the browser retry.
-  if (handlers.onError) source.addEventListener("error", handlers.onError);
+  // surface it but don't tear down — let the browser retry. `readyState` is read
+  // at dispatch time, which is what tells the two cases apart.
+  const onError = (event: Event) => {
+    handlers.onError?.({ closed: source.readyState === EventSource.CLOSED, event });
+  };
+  if (handlers.onError) source.addEventListener("error", onError);
 
   return () => {
+    source.removeEventListener("error", onError);
     source.removeEventListener("status", onStatus as EventListener);
     source.removeEventListener("task_progress", onTaskProgress as EventListener);
     source.removeEventListener("task_done", onTaskDone as EventListener);

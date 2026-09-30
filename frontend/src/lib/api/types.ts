@@ -251,6 +251,18 @@ export interface OidcProviderUpdate {
   is_enabled?: boolean;
 }
 
+/** Rebind ordering: the server applies a rebind (`POST /sessions`, `/resume`) only
+ * if its `bind_seq` is greater than the last one it applied, so a slow, superseded
+ * request cannot rebind the session after a newer one. */
+export interface CreateSessionRequest {
+  profile?: string;
+  bind_seq?: number;
+}
+
+export interface ConversationResumeRequest {
+  bind_seq?: number;
+}
+
 export interface SessionResponse {
   conversation_id: string;
   profile: string;

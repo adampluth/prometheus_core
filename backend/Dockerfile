@@ -36,11 +36,13 @@ RUN --mount=type=cache,id=prometheus-uv-cache,target=/root/.cache/uv,sharing=loc
 # Brings app/config.yml along with the package sources.
 COPY app /app/app
 
-# Alembic migrations for the admin plane (users, OIDC providers, signing
-# keys) -- applied automatically on startup, see app/main.py's lifespan.
+# Alembic migrations for the admin plane (users, OIDC providers, signing keys) --
+# applied by docker-entrypoint.sh before uvicorn starts, NOT from the app's lifespan
+# (which would migrate once per worker; see the entrypoint for why).
 COPY alembic /app/alembic
 COPY alembic.ini /app/alembic.ini
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

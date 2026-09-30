@@ -2,7 +2,7 @@
   "name": "prometheus-frontend",
   "private": true,
   "version": "0.1.0",
-  "description": "React frontend for the Prometheus Platform, replacing Chainlit's default UI while connecting to its backend via @chainlit/react-client.",
+  "description": "React frontend for the Prometheus Platform, talking to the FastAPI backend over its JSON/SSE contract (see backend/CONTRACT.md).",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,7 +12,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@chainlit/react-client": "^0.4.2",
     "@kitware/vtk.js": "^36.5.1",
     "@tailwindcss/vite": "^4.2.2",
     "@thatopen/components": "^3.4.0",
@@ -23,7 +22,6 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
-    "recoil": "^0.7.7",
     "remark-gfm": "^4.0.1",
     "three": "^0.182.0",
     "uuid": "^9.0.1"

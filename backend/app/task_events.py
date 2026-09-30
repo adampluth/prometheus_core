@@ -6,7 +6,10 @@ event on ``tasks:events:{conversation_id}`` and persists the final response unde
 ``tasks:result:{conversation_id}:{task_id}``. The frontend subscribes here and
 renders the result out-of-band when the task finishes.
 
-Uses ``redis.asyncio`` so the listener never blocks the service event loop.
+Uses ``redis.asyncio`` so the listener never blocks the service event loop. Every
+function takes the process-wide client from :mod:`app.redis_client` rather than a URL:
+these used to build a fresh client per call and ``aclose()`` it in ``finally``, which
+cost a TCP connect and teardown on every round trip.
 """
 
 from __future__ import annotations
@@ -15,10 +18,7 @@ import json
 import logging
 from typing import Any, AsyncIterator, Dict, Optional
 
-try:  # redis.asyncio ships with redis-py >= 4.2
-    import redis.asyncio as aioredis
-except Exception:  # pragma: no cover - only when redis is absent
-    aioredis = None  # type: ignore
+from app.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
 
@@ -56,22 +56,13 @@ async def _get_json(client: Any, key: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-async def fetch_result(redis_url: str, conversation_id: str, task_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_result(redis: RedisClient, conversation_id: str, task_id: str) -> Optional[Dict[str, Any]]:
     """Fetch the persisted final response payload for a completed task."""
-    if aioredis is None:
-        return None
-    client = aioredis.from_url(redis_url, decode_responses=True)
-    try:
-        return await _get_json(client, _result_key(conversation_id, task_id))
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+    return await _get_json(redis, _result_key(conversation_id, task_id))
 
 
 async def node_snapshot(
-    redis_url: str,
+    redis: RedisClient,
     conversation_id: str,
     task_id: str,
 ) -> Optional[Dict[str, Any]]:
@@ -82,39 +73,28 @@ async def node_snapshot(
     directly once on startup. The latest status message also seeds the live
     background-progress display.
     """
-    if aioredis is None:
-        return None
-    client = aioredis.from_url(redis_url, decode_responses=True)
-    try:
-        return await _get_json(client, _node_key(conversation_id, task_id))
-    finally:
-        try:
-            await client.aclose()
-        except Exception:
-            pass
+    return await _get_json(redis, _node_key(conversation_id, task_id))
 
 
-async def node_state(redis_url: str, conversation_id: str, task_id: str) -> Optional[str]:
+async def node_state(redis: RedisClient, conversation_id: str, task_id: str) -> Optional[str]:
     """Return only the current persisted state of a Task Graph node."""
-    node = await node_snapshot(redis_url, conversation_id, task_id)
+    node = await node_snapshot(redis, conversation_id, task_id)
     return str(node.get("state")) if node else None
 
 
-async def subscribe(redis_url: str, conversation_id: str) -> AsyncIterator[Dict[str, Any]]:
+async def subscribe(redis: RedisClient, conversation_id: str) -> AsyncIterator[Dict[str, Any]]:
     """Yield Task Graph events for a conversation until the consumer is cancelled.
 
     Each yielded value is a parsed event dict published on
-    ``tasks:events:{conversation_id}`` (``{type, task_id, state, …}``). Yields
-    nothing (returns immediately) when Redis is unavailable, so callers degrade
-    to "no proactive notifications" rather than crashing.
+    ``tasks:events:{conversation_id}`` (``{type, task_id, state, …}``). A Valkey failure
+    propagates to the caller, which logs and degrades to "no proactive notifications"
+    rather than crashing the SSE stream (see ``services/events.run_task_subscriber``).
 
     The single long-lived subscriber per session is started when the session's
-    SSE events stream is opened and cancelled when it closes.
+    SSE events stream is opened and cancelled when it closes. ``pubsub()`` takes its own
+    connection from the shared pool, so this does not block other callers of the client.
     """
-    if aioredis is None:
-        return
-    client = aioredis.from_url(redis_url, decode_responses=True)
-    pubsub = client.pubsub()
+    pubsub = redis.pubsub()
     try:
         await pubsub.subscribe(events_channel(conversation_id))
         async for msg in pubsub.listen():
@@ -127,10 +107,11 @@ async def subscribe(redis_url: str, conversation_id: str) -> AsyncIterator[Dict[
             if isinstance(event, dict):
                 yield event
     finally:
+        # The client itself is process-wide and stays open; only this subscription
+        # (and the connection it borrowed from the pool) is released here.
         for close in (
             lambda: pubsub.unsubscribe(events_channel(conversation_id)),
             pubsub.aclose,
-            client.aclose,
         ):
             try:
                 await close()

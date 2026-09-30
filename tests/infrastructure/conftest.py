@@ -228,7 +228,7 @@ def env_test_file(project_root: Path):
         f"AGENT_SECRET={test_secret}\n"
         f"REDIS_PASSWORD={test_secret}\n"
         f"REDIS_URL=redis://:{test_secret}@redis:6379\n"
-        f"CHAINLIT_AUTH_SECRET={test_secret}\n"
+        f"BACKEND_JWT_SECRET={test_secret}\n"
         f"LITELLM_MASTER_KEY={test_secret}\n"
         f"LITELLM_DB_PASSWORD={test_secret}\n"
         f"LITELLM_LOCAL_PORT=19977\n"

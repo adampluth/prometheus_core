@@ -43,7 +43,11 @@ dev = [
     # In-memory async DB for admin-plane tests (app/db.py, tests/conftest.py) --
     # tests never touch real Postgres; only Alembic/production use asyncpg.
     "aiosqlite>=0.20",
-    "fakeredis>=2.26",
+    # In-memory Valkey/Redis for the session store, the SSE event bus, session
+    # revocation and the artifact catalog (tests/conftest.py's `fake_redis`).
+    # Implements everything those use, pub/sub and PUBSUB NUMSUB included, so none
+    # of it needs a live container.
+    "fakeredis>=2.38",
 ]
 
 [tool.uv.sources]

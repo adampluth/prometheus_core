@@ -43,7 +43,26 @@ def test_valkey_has_no_healthcheck(compose_data):
     assert hc is None, "Valkey currently has no healthcheck (update this test if one is added)"
 
 
-def test_backend_has_no_healthcheck(compose_data):
-    """Document current state: the backend has no healthcheck defined."""
+def test_backend_has_healthcheck(compose_data):
+    """The backend must have one: it carries `restart: unless-stopped`.
+
+    Without a healthcheck the restart policy papers over a backend that boots but
+    cannot serve -- the container reports "Up" either way -- which is precisely the
+    class of silent failure the mesh subprocess pool was added to make visible.
+    """
     hc = _get_healthcheck(compose_data, "backend")
-    assert hc is None, "backend currently has no healthcheck (update this test if one is added)"
+    assert hc is not None, "backend should define a healthcheck"
+
+
+def test_backend_healthcheck_probes_healthz(compose_data):
+    hc = _get_healthcheck(compose_data, "backend")
+    test_cmd = hc["test"]
+    joined = " ".join(test_cmd) if isinstance(test_cmd, list) else test_cmd
+    assert "/healthz" in joined
+    assert "localhost:8000" in joined, "must probe the container port, not the host port"
+
+
+def test_backend_healthcheck_has_start_period(compose_data):
+    """The entrypoint runs `alembic upgrade head` before uvicorn, so first boot is slow."""
+    hc = _get_healthcheck(compose_data, "backend")
+    assert "start_period" in hc

@@ -9,6 +9,7 @@ React app's ``fetch("/user")`` probe. ``/login/{provider_id}`` and
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -30,7 +31,10 @@ from app.security import (
     set_session_cookie,
     verify_token,
 )
+from app.redis_client import get_redis
 from app.sessions import get_store
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -82,8 +86,11 @@ async def login(request: Request, response: Response, db: AsyncSession = Depends
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     token = issue_token(user)
-    # Register the freshly minted session id so downstream endpoints can look it up.
-    get_store(request).get_or_create(verify_token(token).sid)
+    # Assert the freshly minted session id resolves before handing out the cookie.
+    # Nothing is written: an untouched session is just the defaults (see app/sessions.py),
+    # and this is also the first place a Valkey outage surfaces as a failed login rather
+    # than as a cookie that works until the first chat turn.
+    await get_store(request).get_or_create(verify_token(token).sid)
     set_session_cookie(response, token)
     return LoginResult(user=user)
 
@@ -92,15 +99,25 @@ async def login(request: Request, response: Response, db: AsyncSession = Depends
 async def logout(request: Request, response: Response) -> dict[str, bool]:
     """Clear the session cookie and forget any server-side session state."""
     cookie = request.cookies.get(settings.cookie_name)
+    claims = None
     if cookie:
         try:
             claims = verify_token(cookie)
-            get_store(request).drop(claims.sid)
-            # AU-1: revoke the sid so the (still-unexpired) JWT can't be replayed.
-            revoke_session(claims.sid, claims.exp)
         except Exception:
             # A bad/expired cookie has nothing to clean up; still clear it below.
-            pass
+            claims = None
+    if claims is not None:
+        try:
+            await get_store(request).drop(claims.sid)
+            # AU-1: revoke the sid so the (still-unexpired) JWT can't be replayed. In
+            # Valkey now, so the revocation is seen by every worker and survives a restart.
+            await revoke_session(get_redis(request), claims.sid, claims.exp)
+        except Exception as exc:  # noqa: BLE001
+            # Kept separate from the cookie parse above so a Valkey outage is *logged*
+            # rather than silently indistinguishable from a junk cookie: the cookie is
+            # still cleared (the browser forgets the session either way), but the JWT
+            # stays replayable until ``exp``, which an operator should know about.
+            logger.warning("logout: could not revoke sid=%s: %s", claims.sid, exc)
     response.delete_cookie(key=settings.cookie_name, path="/")
     return {"ok": True}
 
@@ -143,7 +160,7 @@ async def login_via_provider(
         value=flow_cookie_value,
         httponly=True,
         samesite="lax",
-        secure=not settings.debug,
+        secure=settings.cookie_secure,
         max_age=300,
         path="/api/auth",
     )
@@ -173,7 +190,7 @@ async def oauth_callback(provider: str, request: Request, db: AsyncSession = Dep
         ) from None
 
     token = issue_token(user)
-    get_store(request).get_or_create(verify_token(token).sid)
+    await get_store(request).get_or_create(verify_token(token).sid)
     # Land back in the SPA root; App.tsx's boot sequence sees the fresh
     # session cookie on its next /api/auth/me probe and renders <ProjectView>.
     redirect = RedirectResponse(url="/")

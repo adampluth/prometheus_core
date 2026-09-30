@@ -13,7 +13,7 @@
 import { useEffect, useState } from "react";
 import { AlertCircle, FileDown, FileText } from "lucide-react";
 import { Markdown } from "@/components/Markdown";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 
 interface ReportProps {
   markdown?: string;

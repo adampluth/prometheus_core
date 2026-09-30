@@ -13,9 +13,8 @@ For inline-only artifacts (``json_body`` / text, no URI) it serializes the conte
 via :func:`app.services.artifacts.artifact_download_payload`.
 
 The lookup deliberately does **not** go through the in-memory session: the session
-is keyed by the cookie's ``sid``, shared by every tab, rebound by "New chat" and
-resume, and gone after a backend restart — none of which should change whether an
-artifact the user owns is fetchable. (``ArtifactMeta.content_url`` carries the
+is keyed by the cookie's ``sid``, shared by every tab, and rebound by "New chat" and
+resume — none of which should change whether an artifact the user owns is fetchable. (``ArtifactMeta.content_url`` carries the
 route, so the frontend never builds it.)
 
 Consolidates Chainlit's ``_render_pdf_artifact`` / ``_render_remote_file_artifact`` /
@@ -39,7 +38,7 @@ import re
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Optional, cast
+from typing import Any, Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
@@ -51,10 +50,10 @@ from app.config import settings
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import artifact_download_payload, classify_render_hint
-from app.services.previews import PreviewUnavailable, PreviewUnreadable
+from app.services.previews import PreviewFailed, PreviewUnavailable, PreviewUnreadable
 from app.services.previews.registry import previewer_for
 from app.services.previews.service import preview_props, preview_root
-from app.sessions import SessionStore
+from app.sessions import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,7 @@ async def find_owned_artifact(
     records ownership; it is sound because a session's ``conversation_id`` is only
     ever server-minted (``POST /api/sessions``) or set by an ownership-checked resume.
     """
-    session = cast(SessionStore, request.app.state.session_store).get(claims.sid)
+    session = await get_store(request).get(claims.sid)
     bound = session is not None and session.conversation_id == conversation_id
     artifact = await asyncio.to_thread(_lookup, conversation_id, artifact_id, claims.sub, bound)
     if artifact is None:
@@ -232,6 +231,8 @@ async def get_artifact_preview(
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Could not read artifact: {exc}"
         )
+    except PreviewFailed as exc:
+        raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Preview failed: {exc}")
     except Exception:
         logger.exception("Building the %s preview failed for artifact %s", previewer.name, artifact_id)
         raise HTTPException(status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Preview failed.")

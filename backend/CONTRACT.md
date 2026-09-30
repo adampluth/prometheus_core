@@ -44,6 +44,12 @@ element/artifact classification and hands the frontend `render_hint`s.
 Explicit session creation (not implicit-on-first-message). Returns the new
 `conversation_id` and the chat-profile content.
 
+Optional body: `{ "profile": "Beginner Chat", "bind_seq": 1759060000123 }`.
+`bind_seq` orders session rebinds (this and `/resume`) by when the user clicked
+rather than by when the request finished: the server applies a rebind only if its
+`bind_seq` is greater than the last one applied to the session. The frontend sends
+a strictly increasing, `Date.now()`-based value. Omitted → always applied.
+
 ```json
 {
   "conversation_id": "c-8f2a…",
@@ -431,6 +437,10 @@ this conversation and returns the same detail shape as `GET /{id}` — so the
 frontend can render history and resume in one round-trip. The **next**
 `POST /api/chat/messages` continues this conversation rather than starting a
 fresh one.
+
+Optional body: `{ "bind_seq": 1759060000123 }` — see `POST /api/sessions`. A
+resume superseded by a newer rebind still returns `200` with the detail, but
+leaves the session where the newer rebind put it; the frontend discards it.
 
 ### `PATCH /api/conversations/{id}` → `ConversationSummary`
 

@@ -16,7 +16,9 @@ import type {
   ConfigResponse,
   ConversationDetailResponse,
   ConversationHistoryResponse,
+  ConversationResumeRequest,
   ConversationSummary,
+  CreateSessionRequest,
   OidcProvider,
   OidcProviderCreate,
   OidcProviderUpdate,
@@ -114,11 +116,13 @@ export const api = {
     return request<ConfigResponse>("/config");
   },
 
-  createSession(profile?: string): Promise<SessionResponse> {
+  createSession(profile?: string, bindSeq?: number): Promise<SessionResponse> {
+    const body: CreateSessionRequest = { bind_seq: bindSeq };
+    if (profile) body.profile = profile;
     return request<SessionResponse>("/sessions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(profile ? { profile } : {}),
+      body: JSON.stringify(body),
     });
   },
 
@@ -144,10 +148,15 @@ export const api = {
   },
 
   /** Rebind the session to a past conversation; the next chat turn continues it. */
-  resumeConversation(conversationId: string): Promise<ConversationDetailResponse> {
+  resumeConversation(conversationId: string, bindSeq?: number): Promise<ConversationDetailResponse> {
+    const body: ConversationResumeRequest = { bind_seq: bindSeq };
     return request<ConversationDetailResponse>(
       `/conversations/${encodeURIComponent(conversationId)}/resume`,
-      { method: "POST" },
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
     );
   },
 

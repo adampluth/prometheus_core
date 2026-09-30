@@ -1,6 +1,4 @@
-import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncIterator
 
 from fastapi import FastAPI, Request
@@ -26,22 +24,10 @@ from app.routers import (
     setup,
     uploads,
 )
-from app import security
+from app import redis_client, security
 from app.services.events import EventBus
+from app.services.previews import pool as preview_pool
 from app.sessions import SessionStore
-
-_ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
-
-
-def _run_admin_db_migrations() -> None:
-    """Apply pending Alembic migrations against admin-db. Synchronous (Alembic's
-    command API blocks); called via asyncio.to_thread from the lifespan below so
-    it doesn't block the event loop during startup."""
-    from alembic import command
-    from alembic.config import Config
-
-    cfg = Config(str(_ALEMBIC_INI))
-    command.upgrade(cfg, "head")
 
 
 @asynccontextmanager
@@ -52,15 +38,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # so this never trips in the test suite.)
     if not settings.jwt_secret:
         raise RuntimeError(
-            "jwt_secret is not configured: set BACKEND_JWT_SECRET or "
-            "CHAINLIT_AUTH_SECRET (both are forwarded to the container in "
-            "docker-compose.yml). Refusing to start with an empty signing key."
+            "jwt_secret is not configured: set BACKEND_JWT_SECRET in .env "
+            "(forwarded to the container in docker-compose.yml). If this deploy "
+            "predates the Chainlit excision, copy the value from the retired "
+            "CHAINLIT_AUTH_SECRET -- it is no longer accepted as a fallback. "
+            "Refusing to start with an empty signing key."
         )
-    # Bring admin-db (local users, OIDC provider config, signing keys) up to the
-    # latest schema before serving any request. A single-replica backend, so
-    # there's no concurrent-migration race to worry about; if this fails the
-    # app refuses to start rather than serving against a stale/missing schema.
-    await asyncio.to_thread(_run_admin_db_migrations)
+    # Schema migrations are NOT run here. `alembic upgrade head` is a deploy step,
+    # executed once by docker-entrypoint.sh before uvicorn starts -- running it in
+    # the lifespan meant every `--workers N` process migrated the same database
+    # concurrently. See backend/README.md ("Migrations run before the app").
+    #
     # Every already-configured OIDC provider becomes resolvable via
     # security.get_provider() before the first request -- routers/admin_oidc.py
     # keeps this in sync afterward (create registers, delete unregisters; an
@@ -68,14 +56,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     session_factory = get_session_factory()
     async with session_factory() as db:
         await security.register_existing_oidc_providers(db)
-    # In-memory session store — one per process, lost on restart (documented in
-    # app/sessions.py).
-    app.state.session_store = SessionStore()
-    # In-process SSE fan-out bus. routers/chat.py publishes StatusEvents onto it;
-    # routers/events.py drains it per connection. Each SSE connection owns its own
-    # Redis subscriber, so no shared Redis connection is held here.
-    app.state.event_bus = EventBus()
-    yield
+    # One async Valkey client (a connection pool) shared by every subsystem that
+    # needs one: sessions, the SSE event bus, session revocation and task events.
+    # See app/redis_client.py.
+    app.state.redis = redis_client.create_client()
+    # Session state lives in Valkey (`session:{sid}`), so it survives a restart and
+    # is consistent across workers. See app/sessions.py.
+    app.state.session_store = SessionStore(app.state.redis)
+    # SSE fan-out over Valkey pub/sub (`sse:{sid}`): routers/chat.py publishes,
+    # routers/events.py drains a local queue fed by a per-sid relay. Publishing
+    # through Valkey is what lets a tab on worker A see a turn running on worker B.
+    app.state.event_bus = EventBus(app.state.redis)
+    try:
+        yield
+    finally:
+        # The preview build pool is created lazily on first use, so this is a no-op on
+        # a server that never built a preview. When it did, spawned workers would
+        # otherwise outlive the server on a graceful stop and hold the container open
+        # until Docker's kill timeout.
+        preview_pool.shutdown()
+        await app.state.redis.aclose()
 
 
 app = FastAPI(title="Prometheus Backend", lifespan=lifespan)

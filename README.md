@@ -39,10 +39,10 @@ graph TD
 
 ```bash
 cp .env.example .env
-# Required: AGENT_SECRET, REDIS_PASSWORD, CHAINLIT_AUTH_SECRET,
+# Required: AGENT_SECRET, REDIS_PASSWORD, BACKEND_JWT_SECRET,
 #           LITELLM_MASTER_KEY, LITELLM_DB_PASSWORD, LITELLM_LOCAL_PORT,
 #           and the API keys referenced by the selected LLM_CONFIG_PROFILE
-# Optional: DEEPLYNX_*, OAUTH_OKTA_*, HTTP_PROXY / HTTPS_PROXY / NO_PROXY
+# Optional: DEEPLYNX_*, HTTP_PROXY / HTTPS_PROXY / NO_PROXY
 ```
 
 ### 2. Authenticate to the container registry
@@ -127,7 +127,7 @@ Backend settings come from `backend/app/config.yml` (override the path with `PRO
 | `agent-url` | Client-agent A2A endpoint (default: `http://localhost:8001`). Overridden by `CLIENT_AGENT_URL`. |
 | `agent-secret` | Bearer token for agent auth. Overridden by `AGENT_SECRET`. |
 | `redis-url` | Redis connection URL for session/conversation state. Overridden by `REDIS_URL`. |
-| `jwt-secret` | Session-cookie signing key. Overridden by `BACKEND_JWT_SECRET` / `CHAINLIT_AUTH_SECRET`. |
+| `jwt-secret` | Session-cookie signing key. Overridden by `BACKEND_JWT_SECRET`. |
 | `debug` | Enable debug features |
 | `auto-approve-steps` | Skip manual approval between workflow steps |
 | `workflow-suggestions` | Chat suggestions shown on startup |
@@ -151,7 +151,7 @@ Notable environment variables (see `.env.example` for the full list):
 
 **DeepLynx** — storage catalog for artifact payloads and `deeplynx://` URI resolution (required for the artifact-debug-agent and a handful of specialist flows). Configure with `DEEPLYNX_BASE_URL`, `DEEPLYNX_KEY`, `DEEPLYNX_SECRET`, `DEEPLYNX_ORG_ID`, `DEEPLYNX_PROJECT_ID`. Instructions to configure a local DeepLynx server can be found [here](docs/docs/local-deeplynx.md).
 
-**OAuth via Okta** — alternative to the local-users login. Configure with `OAUTH_OKTA_CLIENT_ID`, `OAUTH_OKTA_CLIENT_SECRET`, `OAUTH_OKTA_DOMAIN`, `OAUTH_OKTA_AUTHORIZATION_SERVER_ID`, and `CHAINLIT_URL`.
+**OIDC single sign-on** — alternative to the local-users login. Providers are *not* configured by environment variable: an admin registers each one at runtime through the in-app admin UI (`POST /api/admin/oidc-providers`), which stores it in admin-db with the client secret encrypted at rest. Login then lives at `GET /api/auth/login/{provider_id}`. See `docs/docs/dev-docs/multi-user-setup.md`.
 
 ## Project structure
 

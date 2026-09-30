@@ -46,7 +46,6 @@ services:
       redis:
         condition: service_started
     volumes:
-      - ../../shared:/app/shared
       - osti-model-cache:/root/.cache/datalab
       - huggingface-cache:/root/.cache/huggingface
       - torch-cache:/root/.cache/torch

@@ -16,7 +16,6 @@ import logging
 import tempfile
 import uuid
 from pathlib import Path
-from typing import cast
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status as http_status
 
@@ -26,17 +25,13 @@ from app.config import settings
 from app.contract import UploadDescriptor
 from app.security import TokenClaims, current_claims
 from app.services import uploads as upload_service
-from app.sessions import SessionState, SessionStore
+from app.sessions import get_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["uploads"])
 
 _CHUNK_SIZE = 1024 * 1024
-
-
-def _get_store(request: Request) -> SessionStore:
-    return cast(SessionStore, request.app.state.session_store)
 
 
 def _get_a2a_client() -> A2AClient:
@@ -76,13 +71,13 @@ async def post_upload(
     file: UploadFile = File(...),
     claims: TokenClaims = Depends(current_claims),
 ) -> UploadDescriptor:
-    store = _get_store(request)
-    session: SessionState = store.get_or_create(claims.sid)
+    store = get_store(request)
 
     # Uploads attach to a conversation; mint one if a file arrives before the first
-    # POST /api/sessions (mirrors the tolerance in routers/chat.py).
-    if not session.conversation_id:
-        session.conversation_id = str(uuid.uuid4())
+    # POST /api/sessions (mirrors the tolerance in routers/chat.py). Atomic, because the
+    # frontend uploads every selected file in parallel: a read-then-write here let each
+    # request mint its own id and stage its file under a different conversation.
+    conversation_id = await store.ensure_conversation(claims.sid, str(uuid.uuid4()))
 
     name = file.filename or "upload"
 
@@ -99,7 +94,7 @@ async def post_upload(
             _get_a2a_client(),
             tmp_path,
             name=name,
-            conversation_id=session.conversation_id,
+            conversation_id=conversation_id,
             element_mime=file.content_type,
             size_bytes=size,
             user_token=await identity.mint_for_user(claims.sub),

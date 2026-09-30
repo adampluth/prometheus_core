@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ViewerProps } from "../lib/chainlit/elements";
+import type { ViewerProps } from "../lib/elements/elements";
 
 // ---------------------------------------------------------------------------
 // Types

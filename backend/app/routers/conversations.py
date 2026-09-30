@@ -25,9 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, cast
+from typing import Any, Optional, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status as http_status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status as http_status
 
 from app.config import settings
 from app.contract import (
@@ -35,12 +35,13 @@ from app.contract import (
     ConversationHistoryResponse,
     ConversationMessage,
     ConversationRenameRequest,
+    ConversationResumeRequest,
     ConversationSummary,
 )
 from app.conversation_state import ConversationStateClient
 from app.security import TokenClaims, current_claims
 from app.services.artifacts import attribute_artifacts, shape_artifacts
-from app.sessions import SessionState, SessionStore
+from app.sessions import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -61,10 +62,6 @@ def _client() -> ConversationStateClient:
         inst = cls(settings.redis_url)
         _client_cache[cls] = inst
     return inst
-
-
-def _get_store(request: Request) -> SessionStore:
-    return cast(SessionStore, request.app.state.session_store)
 
 
 def _fetch_recent(limit: int, user_id: str) -> tuple[bool, list[dict]]:
@@ -92,36 +89,30 @@ async def get_recent_conversations(
     )
 
 
-def _build_detail(client: ConversationStateClient, conv_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
-    """Assemble the detail/resume response (without artifacts) and the raw artifact
-    catalog from the store (caller has already checked ownership)."""
-    conv = client.get_conversation(conv_id) or {}
-    meta = client.get_meta(conv_id)
-    title = meta.get("title_override") or conv.get("title") or conv.get("user_query", "")
-    messages = client.get_transcript(conv_id)
-    detail = ConversationDetailResponse(
-        conversation_id=conv_id,
-        title=title,
-        profile=str(conv.get("profile") or ""),
-        messages=[
-            ConversationMessage(role=m["role"], content=m["content"], timestamp=m["timestamp"]) for m in messages
-        ],
-    )
-    return detail, client.get_artifacts(conv_id)
-
-
 def _fetch_detail(conv_id: str, user_id: str) -> tuple[bool, Any]:
     """Blocking ownership check + detail assembly, run in a worker thread.
 
     Returns ``(found, (detail, raw_artifacts) or None)``: ``found`` is ``False`` when
     Redis is down, the conversation doesn't exist, or it isn't owned by *user_id* —
     the caller maps that uniformly to 404 so a non-owner can't distinguish "doesn't
-    exist" from "not yours".
+    exist" from "not yours". The detail carries no artifacts yet; :func:`_load_detail`
+    attaches them.
     """
     client = _client()
     if not client.available or not client.owns(user_id, conv_id):
         return False, None
-    return True, _build_detail(client, conv_id)
+    conv = client.get_conversation(conv_id) or {}
+    meta = client.get_meta(conv_id)
+    detail = ConversationDetailResponse(
+        conversation_id=conv_id,
+        title=meta.get("title_override") or conv.get("title") or conv.get("user_query", ""),
+        profile=str(conv.get("profile") or ""),
+        messages=[
+            ConversationMessage(role=m["role"], content=m["content"], timestamp=m["timestamp"])
+            for m in client.get_transcript(conv_id)
+        ],
+    )
+    return True, (detail, client.get_artifacts(conv_id))
 
 
 async def _load_detail(conv_id: str, user_id: str) -> tuple[ConversationDetailResponse, list[dict]]:
@@ -195,19 +186,38 @@ async def delete_conversation(
 async def resume_conversation(
     conversation_id: str,
     request: Request,
+    body: Optional[ConversationResumeRequest] = Body(default=None),
     claims: TokenClaims = Depends(current_claims),
 ) -> ConversationDetailResponse:
     """Rebind the caller's session to a past conversation so the next chat turn
     continues it. Returns its transcript (artifacts attached per turn) in the same
-    call so the frontend can render history and resume in one round-trip."""
+    call so the frontend can render history and resume in one round-trip.
+
+    Loading is metadata only (previews are built lazily), so there is nothing slow to
+    order the rebind around; the rebind itself is ordered by ``bind_seq`` (see
+    ``SessionStore.reset``), so a newer click always wins regardless of which request
+    finishes last."""
     detail, raw_artifacts = await _load_detail(conversation_id, claims.sub)
 
-    store = _get_store(request)
-    session: SessionState = store.get_or_create(claims.sid)
-    session.conversation_id = conversation_id
-    session.artifacts = raw_artifacts
-    session.awaited_task_ids = set()
-    session.consecutive_needs_info = 0
+    store = get_store(request)
+    # Resuming the conversation the session is already on (the reload path) keeps the
+    # awaited-task set, so a task backgrounded before the reload still streams its
+    # `task_progress` / `task_done` into the resumed session -- the ids live in Valkey
+    # rather than in a process-local SessionState. Switching to a *different*
+    # conversation clears it: those ids only resolve against the conversation that
+    # produced them. SessionStore.reset decides which, atomically. Either way the
+    # history sidebar marks a conversation pending while `agent:status:{id}` is live,
+    # and the result lands in the transcript.
+    #
+    # The raw catalog goes on the session because the next turn sends it to the
+    # client-agent. If a newer rebind already won, this is a no-op -- the response is
+    # still returned and the frontend discards it as superseded.
+    await store.reset(
+        claims.sid,
+        conversation_id,
+        artifacts=raw_artifacts,
+        bind_seq=body.bind_seq if body else None,
+    )
 
     detail.auto_approve_steps = settings.auto_approve_steps
     return detail

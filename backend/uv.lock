@@ -389,7 +389,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aiosqlite", specifier = ">=0.20" },
-    { name = "fakeredis", specifier = ">=2.26" },
+    { name = "fakeredis", specifier = ">=2.38" },
     { name = "mypy", specifier = ">=1.15" },
     { name = "prometheus-api", git = "https://github.inl.gov/genesis/prometheus_api.git?rev=23c945443f7113299ba12283d178bb087d6fba35" },
     { name = "pytest", specifier = ">=8.0.0" },

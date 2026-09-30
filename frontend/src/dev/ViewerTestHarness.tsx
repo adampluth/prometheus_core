@@ -17,7 +17,7 @@
  */
 
 import { ElementList } from "../components/ElementRenderer";
-import type { AnyElement } from "../lib/chainlit/elements";
+import type { AnyElement } from "../lib/elements/elements";
 
 const FAKE_MERMAID_ELEMENT: AnyElement = {
   id: "test-mermaid-1",

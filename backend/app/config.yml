@@ -22,13 +22,19 @@ redis-url: "redis://localhost:6379"
 max-upload-bytes: 104857600
 
 # Built artifact previews, e.g. meshes converted to VTP (empty = <tempdir>/prometheus-previews).
-# Overridden by env PROMETHEUS_PREVIEW_CACHE_DIR.
+# Overridden by env PROMETHEUS_PREVIEW_CACHE_DIR. Point this at a persistent volume in
+# production -- docker-compose.yml mounts the `preview-cache` volume for exactly this.
 preview-cache-dir: ""
+# Preview-build subprocess pool size, *per web worker* (env PROMETHEUS_PREVIEW_WORKERS).
+preview-workers: 2
+# Wall-clock budget for building one preview, in seconds (env PROMETHEUS_PREVIEW_TIMEOUT_SECONDS).
+# On expiry the build's worker is killed and the viewer offers a retry / download.
+preview-timeout-seconds: 300
 
 debug: false
 auto-approve-steps: false
 
-# Auth / session cookie (jwt-secret overridden by env BACKEND_JWT_SECRET / CHAINLIT_AUTH_SECRET)
+# Auth / session cookie (jwt-secret overridden by env BACKEND_JWT_SECRET)
 jwt-secret: ""
 cookie-name: "prometheus_session"
 token-ttl-seconds: 86400

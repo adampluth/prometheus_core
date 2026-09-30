@@ -14,7 +14,7 @@ interchangeable, and none of them substitutes for another.
 
 | # | Secret | Algorithm | Protects | Lives in |
 |---|---|---|---|---|
-| 1 | `BACKEND_JWT_SECRET` (or `CHAINLIT_AUTH_SECRET` fallback) | HS256 (symmetric) | The browser session cookie | Backend env only |
+| 1 | `BACKEND_JWT_SECRET` | HS256 (symmetric) | The browser session cookie | Backend env only |
 | 2 | Identity signing key | RS256 (asymmetric) | The platform identity JWT (`userToken`, backend→agents) | admin-db (`SigningKey`, Fernet-encrypted) once one exists, else `USER_IDENTITY_PRIVATE_KEY` env |
 | 3 | `ADMIN_DB_ENCRYPTION_KEY` | Fernet (AES-128-CBC + HMAC-SHA256) | Secret #2's private key material, and every OIDC provider's `client_secret`, at rest in admin-db | Backend env only |
 | 4 | Local account passwords | bcrypt (one-way hash, not encryption — there is no key that reverses it) | Local login credentials | admin-db (`users.password_hash`) |

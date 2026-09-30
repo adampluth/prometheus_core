@@ -1,9 +1,15 @@
 """Offline tests for the turn orchestrator (task 04).
 
 These exercise the pure ``ConversationResponse`` → ``ChatMessageResponse``
-mapping and the ``handle_turn`` glue with a stubbed ``A2AClient`` — no live agent
-or Redis. The router's error-to-inline-response behavior is covered against a
-``TestClient`` with a monkeypatched service.
+mapping and the ``handle_turn`` glue with a stubbed ``A2AClient`` — no live agent.
+The router's error-to-inline-response behavior is covered against a ``TestClient``
+with a monkeypatched service.
+
+Session state is Valkey-backed (``conftest``'s ``session_store`` over ``fakeredis``),
+so the mapper takes ``(store, sid)`` rather than a live ``SessionState``: a snapshot is
+frozen, and every former in-place mutation is now a store write. The assertions here
+therefore *re-read* the session after the call — which is also the stronger check, since
+it proves the mutation reached Valkey rather than a local object.
 """
 
 import pytest
@@ -12,15 +18,23 @@ from fastapi.testclient import TestClient
 from app.a2a_client import ConversationResponse
 from app.contract import ChatMessageResponse, ChatStatus
 from app.services import chat as chat_service
-from app.sessions import SessionState
+from app.sessions import SessionStore
+
+SID = "sid-1"
 
 
 def _resp(**kwargs) -> ConversationResponse:
     return ConversationResponse.from_payload({"conversation_id": "c1", **kwargs})
 
 
-def _session() -> SessionState:
-    return SessionState(sid="sid-1", conversation_id="c1")
+async def _seed(store: SessionStore, sid: str = SID, *, conversation_id: str = "c1") -> None:
+    """Bind ``sid`` to a conversation — the state every mapper branch reads."""
+    await store.reset(sid, conversation_id)
+
+
+async def _stored(store: SessionStore, sid: str = SID):
+    """Re-read the session snapshot after a call that was supposed to write."""
+    return await store.get_or_create(sid)
 
 
 # --------------------------------------------------------------------------- #
@@ -28,8 +42,8 @@ def _session() -> SessionState:
 # --------------------------------------------------------------------------- #
 
 
-def test_map_completed_shapes_artifacts_and_persists_catalog():
-    session = _session()
+async def test_map_completed_shapes_artifacts_and_persists_catalog(session_store):
+    await _seed(session_store)
     response = _resp(
         status="completed",
         report="The analysis is done.",
@@ -41,7 +55,9 @@ def test_map_completed_shapes_artifacts_and_persists_catalog():
         message_metadata={"follow_up_suggestions": ["Do X", "Do Y"]},
     )
 
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
 
     assert mapped.status == ChatStatus.COMPLETED.value
     assert mapped.turn_id == "t1"
@@ -51,33 +67,37 @@ def test_map_completed_shapes_artifacts_and_persists_catalog():
     assert mapped.artifacts[0].artifact_id == "a1"
     assert mapped.follow_up_suggestions == ["Do X", "Do Y"]
     # Full catalog persisted onto the session for task-07 content fetches.
-    assert session.artifacts == [{"artifact_id": "a1", "name": "full"}]
+    assert (await _stored(session_store)).artifacts == [{"artifact_id": "a1", "name": "full"}]
 
 
-def test_map_completed_slash_command_suppresses_artifacts():
-    session = _session()
+async def test_map_completed_slash_command_suppresses_artifacts(session_store):
+    await _seed(session_store)
     response = _resp(
         status="completed",
         report="done",
         new_artifacts=[{"artifact_id": "a1", "name": "x"}],
         message_metadata={"slash_command": True},
     )
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped.artifacts is None
 
 
-def test_map_completed_falls_back_to_artifact_count_text():
-    session = _session()
+async def test_map_completed_falls_back_to_artifact_count_text(session_store):
+    await _seed(session_store)
     response = _resp(
         status="completed",
         new_artifacts=[{"artifact_id": "a1", "name": "x", "mime_type": "application/json"}],
     )
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped.report == "1 artifact(s) ready."
 
 
-def test_map_needs_info_normalizes_questions():
-    session = _session()
+async def test_map_needs_info_normalizes_questions(session_store):
+    await _seed(session_store)
     response = _resp(
         status="needs_info",
         message="Need more",
@@ -92,7 +112,9 @@ def test_map_needs_info_normalizes_questions():
             {"question": "Material?", "type": "select", "options": ["steel", "copper"]},
         ],
     )
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
 
     assert mapped.status == ChatStatus.NEEDS_INFO.value
     assert mapped.followup_questions is not None and len(mapped.followup_questions) == 2
@@ -107,73 +129,99 @@ def test_map_needs_info_normalizes_questions():
     assert [o.value for o in second.options] == ["steel", "copper"]
 
 
-def test_map_plan_ready_carries_auto_approve():
-    session = _session()
+async def test_map_plan_ready_carries_auto_approve(session_store):
+    await _seed(session_store)
     response = _resp(status="plan_ready", message="Proposed plan", plan={"steps": ["a", "b"]})
 
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=True)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=True
+    )
     assert mapped.status == ChatStatus.PLAN_READY.value
     assert mapped.plan == {"steps": ["a", "b"]}
     assert mapped.auto_approve is True
 
-    mapped_off = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped_off = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped_off.auto_approve is False
 
 
-def test_map_backgrounded_registers_awaited_task():
-    session = _session()
+async def test_map_backgrounded_registers_awaited_task(session_store):
+    await _seed(session_store)
     response = _resp(status="backgrounded", message_metadata={"task_id": "task-42"})
 
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped.status == ChatStatus.BACKGROUNDED.value
     assert mapped.task_id == "task-42"
-    assert "task-42" in session.awaited_task_ids
+    assert "task-42" in (await _stored(session_store)).awaited_task_ids
 
 
 # --------------------------------------------------------------------------- #
-# stale — a turn whose session has since moved to a different conversation
+# rebind — a turn whose session has since moved to a different conversation
 # (chat-history "New chat"/resume while a turn is in flight) must not mutate
-# session state for the conversation the session now points at.
+# session state for the conversation the session now points at. The writes are
+# guarded on the turn's own conversation id, so a rebind at any point before them wins.
 # --------------------------------------------------------------------------- #
 
 
-def test_map_final_skips_session_mutation_when_stale():
-    session = _session()
+async def _rebind(store: SessionStore, sid: str = SID) -> None:
+    await store.reset(sid, "c2", artifacts=[{"artifact_id": "c2-art"}])
+
+
+async def test_map_final_skips_session_mutation_after_rebind(session_store):
+    await _seed(session_store)
+    await _rebind(session_store)
     response = _resp(
         status="completed",
         report="done",
         artifacts=[{"artifact_id": "a1", "name": "full"}],
     )
 
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False, stale=True)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
 
     # A response is still produced (the original HTTP request needs one)...
     assert mapped.status == ChatStatus.COMPLETED.value
-    # ...but the session's artifact catalog — which belongs to whatever
-    # conversation the session is *currently* bound to — is untouched.
-    assert session.artifacts == []
+    # ...but the catalog of the conversation the session is *now* bound to is untouched.
+    assert (await _stored(session_store)).artifacts == [{"artifact_id": "c2-art"}]
 
 
-def test_map_backgrounded_skips_registration_when_stale():
-    session = _session()
+async def test_map_backgrounded_skips_registration_after_rebind(session_store):
+    await _seed(session_store)
+    await _rebind(session_store)
     response = _resp(status="backgrounded", message_metadata={"task_id": "task-42"})
 
-    chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False, stale=True)
+    await chat_service.map_response(response, "t1", session_store, SID, conversation_id="c1", auto_approve=False)
 
-    assert session.awaited_task_ids == set()
+    assert not (await _stored(session_store)).awaited_task_ids
 
 
-def test_map_needs_info_depth_cap_not_applied_when_stale():
-    session = _session()
-    session.consecutive_needs_info = 5
+async def test_map_needs_info_depth_cap_not_applied_after_rebind(session_store):
+    await _seed(session_store, conversation_id="c2")
+    for _ in range(5):
+        await session_store.bump_needs_info(SID, conversation_id="c2")
     ni = _resp(status="needs_info", message="m", followup_questions=[])
 
-    mapped = chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False, stale=True)
+    mapped = await chat_service.map_response(ni, "t", session_store, SID, conversation_id="c1", auto_approve=False)
 
     # Still a needs_info response, not the "too many followups" fallback...
     assert mapped.status == ChatStatus.NEEDS_INFO.value
     # ...and the counter for the conversation the session now points at is untouched.
-    assert session.consecutive_needs_info == 5
+    assert (await _stored(session_store)).consecutive_needs_info == 5
+
+
+async def test_map_other_status_does_not_reset_the_new_conversations_counter(session_store):
+    await _seed(session_store, conversation_id="c2")
+    await session_store.bump_needs_info(SID, conversation_id="c2")
+
+    await chat_service.map_response(
+        _resp(status="answer", response_text="x"), "t", session_store, SID, conversation_id="c1", auto_approve=False
+    )
+
+    assert (await _stored(session_store)).consecutive_needs_info == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -181,23 +229,30 @@ def test_map_needs_info_depth_cap_not_applied_when_stale():
 # --------------------------------------------------------------------------- #
 
 
-def test_answer_text_only_in_response_text():
-    session = _session()
-    mapped = chat_service.map_response(
-        _resp(status="answer", response_text="42", message="noise"), "t", session, conversation_id="c1", auto_approve=False
+async def test_answer_text_only_in_response_text(session_store):
+    await _seed(session_store)
+    mapped = await chat_service.map_response(
+        _resp(status="answer", response_text="42", message="noise"),
+        "t",
+        session_store,
+        SID,
+        conversation_id="c1",
+        auto_approve=False,
     )
     assert mapped.response_text == "42"
     assert mapped.report is None
     assert mapped.message is None
 
 
-def test_completed_text_only_in_report():
-    session = _session()
-    mapped = chat_service.map_response(
+async def test_completed_text_only_in_report(session_store):
+    await _seed(session_store)
+    mapped = await chat_service.map_response(
         _resp(status="completed", report="done", response_text="dup", message="noise"),
         "t",
-        session,
-        conversation_id="c1", auto_approve=False,
+        session_store,
+        SID,
+        conversation_id="c1",
+        auto_approve=False,
     )
     assert mapped.report == "done"
     assert mapped.response_text is None
@@ -209,50 +264,59 @@ def test_completed_text_only_in_report():
 # --------------------------------------------------------------------------- #
 
 
-def test_needs_info_depth_cap_stops_looping():
-    session = _session()
+async def test_needs_info_depth_cap_stops_looping(session_store):
+    await _seed(session_store)
     ni = _resp(status="needs_info", followup_questions=[{"field": "f", "question": "Q?"}])
     # The cap allows N consecutive needs_info turns…
     for _ in range(chat_service._MAX_CONSECUTIVE_NEEDS_INFO):
-        assert chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False).status == ChatStatus.NEEDS_INFO.value
+        mapped = await chat_service.map_response(ni, "t", session_store, SID, conversation_id="c1", auto_approve=False)
+        assert mapped.status == ChatStatus.NEEDS_INFO.value
     # …then stops looping with a plain message instead of another form.
-    capped = chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
+    capped = await chat_service.map_response(ni, "t", session_store, SID, conversation_id="c1", auto_approve=False)
     assert capped.status == ChatStatus.ANSWER.value
     assert capped.followup_questions is None
     assert "restate" in (capped.response_text or "").lower()
 
 
-def test_needs_info_counter_resets_on_other_status():
-    session = _session()
+async def test_needs_info_counter_resets_on_other_status(session_store):
+    await _seed(session_store)
     ni = _resp(status="needs_info", followup_questions=[{"field": "f", "question": "Q?"}])
-    chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
-    chat_service.map_response(ni, "t", session, conversation_id="c1", auto_approve=False)
-    assert session.consecutive_needs_info == 2
-    chat_service.map_response(_resp(status="answer", response_text="done"), "t", session, conversation_id="c1", auto_approve=False)
-    assert session.consecutive_needs_info == 0
+    await chat_service.map_response(ni, "t", session_store, SID, conversation_id="c1", auto_approve=False)
+    await chat_service.map_response(ni, "t", session_store, SID, conversation_id="c1", auto_approve=False)
+    assert (await _stored(session_store)).consecutive_needs_info == 2
+    await chat_service.map_response(
+        _resp(status="answer", response_text="done"), "t", session_store, SID, conversation_id="c1", auto_approve=False
+    )
+    assert (await _stored(session_store)).consecutive_needs_info == 0
 
 
-def test_map_backgrounded_without_task_id_registers_nothing():
-    session = _session()
+async def test_map_backgrounded_without_task_id_registers_nothing(session_store):
+    await _seed(session_store)
     response = _resp(status="backgrounded")
-    mapped = chat_service.map_response(response, "t1", session, conversation_id="c1", auto_approve=False)
+    mapped = await chat_service.map_response(
+        response, "t1", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert mapped.task_id is None
-    assert session.awaited_task_ids == set()
+    assert not (await _stored(session_store)).awaited_task_ids
 
 
-def test_map_executing_and_error_and_unknown():
-    session = _session()
+async def test_map_executing_and_error_and_unknown(session_store):
+    await _seed(session_store)
 
-    executing = chat_service.map_response(_resp(status="executing"), "t", session, conversation_id="c1", auto_approve=False)
+    executing = await chat_service.map_response(
+        _resp(status="executing"), "t", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert executing.status == ChatStatus.EXECUTING.value
     assert "executing" in (executing.message or "").lower()
 
-    err = chat_service.map_response(_resp(status="error", message="boom"), "t", session, conversation_id="c1", auto_approve=False)
+    err = await chat_service.map_response(
+        _resp(status="error", message="boom"), "t", session_store, SID, conversation_id="c1", auto_approve=False
+    )
     assert err.status == ChatStatus.ERROR.value
     assert err.message == "boom"
 
-    answer = chat_service.map_response(
-        _resp(status="answer", response_text="hi"), "t", session, conversation_id="c1", auto_approve=False
+    answer = await chat_service.map_response(
+        _resp(status="answer", response_text="hi"), "t", session_store, SID, conversation_id="c1", auto_approve=False
     )
     assert answer.status == ChatStatus.ANSWER.value
     assert answer.response_text == "hi"
@@ -273,14 +337,15 @@ class _StubClient:
         return self._response
 
 
-async def test_handle_turn_forwards_args_and_maps():
-    session = _session()
-    session.artifacts = [{"artifact_id": "a1"}]
+async def test_handle_turn_forwards_args_and_maps(session_store):
+    await _seed(session_store)
+    await session_store.set_artifacts(SID, [{"artifact_id": "a1"}], conversation_id="c1")
     client = _StubClient(_resp(status="answer", response_text="ok"))
 
     mapped = await chat_service.handle_turn(
         client,  # type: ignore[arg-type]
-        session,
+        session_store,
+        SID,
         turn_id="t1",
         query="hello",
         plan_approved=True,
@@ -293,13 +358,14 @@ async def test_handle_turn_forwards_args_and_maps():
     assert client.sent["artifacts"] == [{"artifact_id": "a1"}]
 
 
-async def test_handle_turn_forwards_user_token():
-    session = _session()
+async def test_handle_turn_forwards_user_token(session_store):
+    await _seed(session_store)
     client = _StubClient(_resp(status="answer", response_text="ok"))
 
     await chat_service.handle_turn(
         client,  # type: ignore[arg-type]
-        session,
+        session_store,
+        SID,
         turn_id="t1",
         query="hello",
         user_token="fake.jwt.token",
@@ -308,13 +374,14 @@ async def test_handle_turn_forwards_user_token():
     assert client.sent["user_token"] == "fake.jwt.token"
 
 
-async def test_handle_turn_user_token_defaults_to_none():
-    session = _session()
+async def test_handle_turn_user_token_defaults_to_none(session_store):
+    await _seed(session_store)
     client = _StubClient(_resp(status="answer", response_text="ok"))
 
     await chat_service.handle_turn(
         client,  # type: ignore[arg-type]
-        session,
+        session_store,
+        SID,
         turn_id="t1",
         query="hello",
     )
@@ -322,21 +389,33 @@ async def test_handle_turn_user_token_defaults_to_none():
     assert client.sent["user_token"] is None
 
 
-async def test_handle_turn_requires_conversation_id():
-    session = SessionState(sid="sid-x")  # no conversation_id
+async def test_handle_turn_requires_conversation_id(session_store):
+    # "sid-x" was never bound to a conversation, so the store returns the empty default
+    # snapshot and handle_turn refuses the turn rather than inventing an id.
     client = _StubClient(_resp(status="answer"))
     with pytest.raises(ValueError):
-        await chat_service.handle_turn(client, session, turn_id="t", query="q")  # type: ignore[arg-type]
+        await chat_service.handle_turn(client, session_store, "sid-x", turn_id="t", query="q")  # type: ignore[arg-type]
 
 
 class _ConversationSwitchingStubClient:
     """Simulates a chat-history "New chat"/resume rebinding the session's
-    ``conversation_id`` while a turn is still in flight — the exact race
-    ``handle_turn``'s ``stale`` computation guards against."""
+    ``conversation_id`` while a turn is still in flight — the race the guarded session
+    writes close.
 
-    def __init__(self, response: ConversationResponse, session: SessionState, new_conversation_id: str):
+    The rebind is a store write landing after ``handle_turn`` captured the conversation
+    id and before it writes the result back, so only a write that re-checks the binding
+    atomically with the write itself can notice it."""
+
+    def __init__(
+        self,
+        response: ConversationResponse,
+        store: SessionStore,
+        sid: str,
+        new_conversation_id: str,
+    ):
         self._response = response
-        self._session = session
+        self._store = store
+        self._sid = sid
         self._new_conversation_id = new_conversation_id
         self.sent: dict = {}
 
@@ -344,22 +423,23 @@ class _ConversationSwitchingStubClient:
         self.sent = kwargs
         # The outgoing request must have already captured the ORIGINAL conversation_id
         # before this "rebind" happens (asserted by the caller against .sent).
-        self._session.conversation_id = self._new_conversation_id
+        await self._store.reset(self._sid, self._new_conversation_id, artifacts=[{"artifact_id": "c2-art"}])
         return self._response
 
 
-async def test_handle_turn_sends_original_conversation_but_skips_stale_mutation():
-    session = _session()  # conversation_id == "c1"
+async def test_handle_turn_sends_original_conversation_but_skips_stale_mutation(session_store):
+    await _seed(session_store)  # conversation_id == "c1"
     response = _resp(
         status="completed",
         report="done for c1",
         artifacts=[{"artifact_id": "a1", "name": "c1-catalog"}],
     )
-    client = _ConversationSwitchingStubClient(response, session, new_conversation_id="c2")
+    client = _ConversationSwitchingStubClient(response, session_store, SID, new_conversation_id="c2")
 
     mapped = await chat_service.handle_turn(
         client,  # type: ignore[arg-type]
-        session,
+        session_store,
+        SID,
         turn_id="t1",
         query="hello",
     )
@@ -370,8 +450,8 @@ async def test_handle_turn_sends_original_conversation_but_skips_stale_mutation(
     assert mapped.status == ChatStatus.COMPLETED.value
     # ...but the session (now bound to "c2") did not get c1's artifact catalog stomped
     # onto it.
-    assert session.conversation_id == "c2"
-    assert session.artifacts == []
+    assert (await _stored(session_store)).conversation_id == "c2"
+    assert (await _stored(session_store)).artifacts == [{"artifact_id": "c2-art"}]
 
 
 def test_upload_descriptors_to_dicts_roundtrip():
@@ -394,12 +474,10 @@ def _authed_client(monkeypatch) -> tuple[TestClient, str]:
     from app import security
     from app.config import settings
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
 
-    app.state.session_store = SessionStore()
     token = security.issue_token(security.User(identifier="alice"), sid="sid-router")
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
@@ -434,7 +512,7 @@ def test_post_message_uploads_only_uses_default_query(monkeypatch):
     client, _sid = _authed_client(monkeypatch)
     captured: dict = {}
 
-    async def capture(client_arg, session, *, turn_id, query, **kwargs):
+    async def capture(client_arg, store_arg, sid_arg, *, turn_id, query, **kwargs):
         captured["query"] = query
         return ChatMessageResponse(turn_id=turn_id, status=ChatStatus.ANSWER, response_text="ok")
 
@@ -453,9 +531,7 @@ def test_post_message_uploads_only_uses_default_query(monkeypatch):
 
 def test_post_message_requires_auth(monkeypatch):
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     client = TestClient(app)
     resp = client.post("/api/chat/messages", json={"query": "hi"})
     assert resp.status_code == 401

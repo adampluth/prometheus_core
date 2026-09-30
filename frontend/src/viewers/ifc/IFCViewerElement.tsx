@@ -15,7 +15,7 @@ import ViewerOverlayPanels, { DownloadItem } from "./ViewerOverlayPanels";
 import { VISIBILITY_TOGGLES } from "./modelViewerTypes";
 import type { VisibilityCategory } from "./modelViewerTypes";
 import type { PipeRunItem } from "./IFCViewerEngine";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 
 type IFCProps = {
   fileUrl?: string;

@@ -15,6 +15,11 @@ class PreviewUnreadable(Exception):
     """The source was fetched but the previewer can't process it (mapped to 422)."""
 
 
+class PreviewFailed(Exception):
+    """The build process crashed, timed out, or was torn down (mapped to 500 with
+    this message, which is safe to show)."""
+
+
 class Previewer(Protocol):
     """Turns one kind of artifact into a viewer-ready rendition.
 
@@ -33,8 +38,10 @@ class Previewer(Protocol):
     def build(self, source: Path, artifact: dict[str, Any], out_dir: Path) -> dict[str, Any]:
         """Write the preview's files into ``out_dir`` and return the viewer props.
 
-        Runs in a worker thread, so it may block (and may import heavy libraries
-        lazily). ``source`` is the artifact's resolved local file. The returned
+        Runs in a spawned subprocess (``pool.py``), so it may block, crash, or import
+        heavy libraries — and should import them lazily, inside this method, so the
+        web process never loads them. The previewer instance is pickled to get there:
+        keep it a plain object defined at module top level. ``source`` is the artifact's resolved local file. The returned
         props must be JSON-serializable; the service adds ``baseUrl``, under which
         every file in ``out_dir`` is served by name. Raise :class:`PreviewUnreadable`
         for input the previewer can't handle.

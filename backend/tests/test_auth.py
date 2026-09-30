@@ -12,14 +12,10 @@ def _authed(monkeypatch, *, sid: str) -> tuple[TestClient, object]:
     from app import security
     from app.config import settings
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
 
-    store = SessionStore()
-    store.get_or_create(sid)
-    app.state.session_store = store
     token = security.issue_token(security.User(identifier="alice"), sid=sid)
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
@@ -91,14 +87,12 @@ async def test_login_endpoint_authenticates_against_db(monkeypatch, wire_db_sess
     from app.db.models import User as UserRow
     from app.main import app
     from app.passwords import hash_password
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
     wire_db_session.add(
         UserRow(username="alice", password_hash=hash_password("s3cret"), role="admin", provider="credentials")
     )
     await wire_db_session.commit()
-    app.state.session_store = SessionStore()
 
     client = TestClient(app)
     resp = client.post("/api/auth/login", json={"username": "alice", "password": "s3cret"})
@@ -117,9 +111,7 @@ async def test_login_endpoint_authenticates_against_db(monkeypatch, wire_db_sess
 
 def test_config_requires_auth():
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     assert TestClient(app).get("/api/config").status_code == 401
 
 

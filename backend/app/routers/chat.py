@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional, cast
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status as http_status
 
@@ -23,10 +23,11 @@ from app import identity
 from app.a2a_client import A2AClient
 from app.config import settings
 from app.contract import ChatMessageRequest, ChatMessageResponse, ChatStatus, StatusEvent
+from app.redis_client import get_redis
 from app.security import TokenClaims, current_claims
 from app.services import chat as chat_service
 from app.services import events as events_service
-from app.sessions import SessionState, SessionStore
+from app.sessions import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -34,10 +35,6 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 # Cap on the accumulated in-flight status history carried on each StatusEvent (E-1).
 _STATUS_HISTORY_LIMIT = 50
-
-
-def _get_store(request: Request) -> SessionStore:
-    return cast(SessionStore, request.app.state.session_store)
 
 
 def _get_event_bus(request: Request):
@@ -93,13 +90,12 @@ async def post_message(
     body: ChatMessageRequest,
     claims: TokenClaims = Depends(current_claims),
 ) -> ChatMessageResponse:
-    store = _get_store(request)
-    session: SessionState = store.get_or_create(claims.sid)
+    store = get_store(request)
 
     # A conversation is normally started via POST /api/sessions; tolerate a
-    # missing one by minting an id so a bare first message still works.
-    if not session.conversation_id:
-        session.conversation_id = str(uuid.uuid4())
+    # missing one by minting an id so a bare first message still works. Atomic
+    # (HSETNX) so it can't race a concurrent upload minting its own.
+    await store.ensure_conversation(claims.sid, str(uuid.uuid4()))
 
     query = (body.query or "").strip()
     if (
@@ -126,7 +122,8 @@ async def post_message(
     try:
         response = await chat_service.handle_turn(
             _get_a2a_client(),
-            session,
+            store,
+            claims.sid,
             turn_id=turn_id,
             query=query,
             followup_answers=body.followup_answers,
@@ -154,8 +151,9 @@ async def post_message(
         try:
             await events_service.reconcile_backgrounded(
                 event_bus,
-                session,
-                settings.redis_url,
+                store,
+                claims.sid,
+                get_redis(request),
                 response.task_id,
                 auto_approve=settings.auto_approve_steps,
             )

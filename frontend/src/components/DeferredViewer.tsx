@@ -17,8 +17,8 @@
  */
 
 import { Suspense, useEffect, useRef, useState, type RefObject } from "react";
-import type { AnyElement, ViewerComponent } from "../lib/chainlit/elements";
-import { loadPreview, peekPreview, type PreviewProps } from "../lib/chainlit/previews";
+import type { AnyElement, ViewerComponent } from "../lib/elements/elements";
+import { loadPreview, peekPreview, type PreviewProps } from "../lib/elements/previews";
 
 const MOUNT_MARGIN_PX = 200;
 const UNMOUNT_MARGIN_PX = 1500;

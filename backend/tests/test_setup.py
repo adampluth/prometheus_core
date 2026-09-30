@@ -13,14 +13,13 @@ from fastapi.testclient import TestClient
 def _client(monkeypatch) -> TestClient:
     from app import security
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
-    # set_session_cookie() marks the cookie `secure=not settings.debug`; TestClient
-    # talks plain http, so a secure cookie would silently never be replayed on the
-    # follow-up request below. debug=True mirrors local (non-TLS) dev.
-    monkeypatch.setattr(security.settings, "debug", True, raising=False)
-    app.state.session_store = SessionStore()
+    # set_session_cookie() marks the cookie `secure=settings.cookie_secure`;
+    # TestClient talks plain http, so a secure cookie would silently never be
+    # replayed on the follow-up request below. False mirrors local (non-TLS) dev,
+    # which is what `BACKEND_PUBLIC_URL=http://...` produces (config._cookie_secure).
+    monkeypatch.setattr(security.settings, "cookie_secure", False, raising=False)
     return TestClient(app)
 
 

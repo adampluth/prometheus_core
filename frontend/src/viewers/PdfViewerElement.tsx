@@ -10,7 +10,7 @@
  */
 
 import { FileDown } from "lucide-react";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 
 export function PdfViewerElement({ element }: ViewerProps) {
   const url = element.url ?? null;

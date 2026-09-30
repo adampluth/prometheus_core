@@ -43,7 +43,7 @@ Specialist agents verify the JWT independently
 ```
 
 **Two distinct JWTs, two distinct keys** — easy to conflate, so be precise:
-- `BACKEND_JWT_SECRET` (or its `CHAINLIT_AUTH_SECRET` fallback, HS256) signs the
+- `BACKEND_JWT_SECRET` (HS256) signs the
   **browser session cookie** — backend-to-browser only, never leaves the backend.
 - The **platform identity JWT** — backend-to-agents, carried in
   `message.metadata["userToken"]` — is signed RS256 with whichever key

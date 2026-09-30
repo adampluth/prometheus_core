@@ -62,10 +62,33 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+#: Advisory-lock id serialising `alembic upgrade` against admin-db. Any fixed 64-bit
+#: integer works -- Postgres advisory locks are a bare namespace with no registry -- so
+#: it only has to be one no other component of this deployment reuses. Digits spell
+#: "prometheus admin-db migrations".
+_MIGRATION_LOCK_ID = 8317202504
+
+
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
 
     with context.begin_transaction():
+        # Serialise concurrent upgrades. docker-entrypoint.sh already runs this once
+        # per container before uvicorn starts, but that does not cover two containers
+        # booting together, or a developer running the CLI while one boots. Without the
+        # lock each caller reads the same `alembic_version`, concludes the same
+        # migrations are pending, and emits the same DDL -- the losers fail with
+        # "relation already exists" or deadlock, and a failure here aborts the upgrade.
+        #
+        # Taken *before* run_migrations() so it is held before Alembic reads
+        # `alembic_version`: a second caller then blocks first and reads the *updated*
+        # revision, correctly finding nothing to do. The `_xact_` variant releases with
+        # the transaction, so there is no unlock to leak on a failed migration.
+        #
+        # Unconditional: admin_database_url is Postgres-only (app/config.py), there is
+        # no SQLite path. The id is interpolated, not bound -- it is a module constant,
+        # and asyncpg does not accept the `%s` paramstyle anyway.
+        connection.exec_driver_sql(f"SELECT pg_advisory_xact_lock({_MIGRATION_LOCK_ID})")
         context.run_migrations()
 
 

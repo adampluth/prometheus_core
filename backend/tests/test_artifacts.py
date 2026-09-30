@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app import uri_resolver
 from app.conversation_state import ConversationStateClient
 from app.routers import artifacts as artifacts_router
-from app.services.previews import PreviewUnavailable, PreviewUnreadable
+from app.services.previews import PreviewFailed, PreviewUnavailable, PreviewUnreadable
 from app.services.artifacts import (
     artifact_download_payload,
     artifact_identity,
@@ -164,7 +164,6 @@ def _authed_client(monkeypatch, artifacts=None, *, owner: str = "alice") -> Test
     from app import security
     from app.config import settings
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
@@ -178,8 +177,8 @@ def _authed_client(monkeypatch, artifacts=None, *, owner: str = "alice") -> Test
     state._client = fake
     monkeypatch.setattr(artifacts_router, "_client", lambda: state)
 
-    # A fresh session with an empty catalog: content must not depend on it.
-    app.state.session_store = SessionStore()
+    # conftest installs a fresh session store, so the session is unbound: content
+    # must not depend on it.
     token = security.issue_token(security.User(identifier="alice"), sid="sid-artifact")
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
@@ -192,9 +191,7 @@ def _url(artifact_id: str, conversation_id: str = "c1") -> str:
 
 def test_content_requires_auth():
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     client = TestClient(app)
     resp = client.get(_url("a1"))
     assert resp.status_code == 401
@@ -237,13 +234,11 @@ def test_content_404_for_conversation_owned_by_someone_else(monkeypatch):
     assert client.get(_url("a1")).status_code == 404
 
 
-def test_content_allowed_for_session_bound_conversation_without_ownership(monkeypatch):
+async def test_content_allowed_for_session_bound_conversation_without_ownership(monkeypatch, session_store):
     # No identity keys → the client-agent never records ownership; the live chat's
     # own (server-minted) conversation must still serve its artifacts.
-    from app.main import app
-
     client = _authed_client(monkeypatch, artifacts=[{"artifact_id": "a1", "json_body": {"k": 1}}], owner="nobody")
-    app.state.session_store.get_or_create("sid-artifact").conversation_id = "c1"
+    await session_store.reset("sid-artifact", "c1")
     assert client.get(_url("a1")).json() == {"k": 1}
 
 
@@ -321,6 +316,7 @@ def test_preview_route_404_for_conversation_owned_by_someone_else(monkeypatch):
     [
         (PreviewUnavailable("gone"), 502),
         (PreviewUnreadable("not exodus"), 422),
+        (PreviewFailed("the preview builder crashed"), 500),
         (RuntimeError("boom"), 500),
     ],
 )
@@ -328,6 +324,15 @@ def test_preview_route_maps_failures(monkeypatch, error, status):
     _stub_preview_props(monkeypatch, error)
     client = _authed_client(monkeypatch, artifacts=[_MESH_ART])
     assert client.get("/api/conversations/c1/artifacts/m1/preview").status_code == status
+
+
+def test_preview_route_shows_pool_failures_but_hides_unexpected_ones(monkeypatch):
+    # PreviewFailed messages are written for the user; an arbitrary exception's are not.
+    client = _authed_client(monkeypatch, artifacts=[_MESH_ART])
+    _stub_preview_props(monkeypatch, PreviewFailed("took longer than 300s"))
+    assert "took longer than 300s" in client.get("/api/conversations/c1/artifacts/m1/preview").json()["detail"]
+    _stub_preview_props(monkeypatch, RuntimeError("/secret/path"))
+    assert "/secret/path" not in client.get("/api/conversations/c1/artifacts/m1/preview").json()["detail"]
 
 
 # --------------------------------------------------------------------------- #

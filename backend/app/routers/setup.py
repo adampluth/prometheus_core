@@ -97,6 +97,6 @@ async def bootstrap(
 
     user = User(identifier=row.username, role=row.role, provider=row.provider)
     token = issue_token(user)
-    get_store(request).get_or_create(verify_token(token).sid)
+    await get_store(request).get_or_create(verify_token(token).sid)
     set_session_cookie(response, token)
     return BootstrapResult(user=user)

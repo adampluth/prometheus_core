@@ -35,12 +35,3 @@ def test_backend_healthz(backend_base_url):
     resp = httpx.get(f"{backend_base_url}/healthz", timeout=15, follow_redirects=True)
     assert resp.status_code == 200
 
-
-def test_backend_shared_mount_visible(docker_compose_up):
-    """The bind mount for shared/ should be visible inside the container."""
-    result = subprocess.run(
-        ["docker", "exec", "backend", "ls", "/app/shared/__init__.py"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"shared mount not visible: {result.stderr}"

@@ -1,5 +1,16 @@
 @import "tailwindcss";
 
+/* Tailwind scans every source file for class names and calls Vite's addWatchFile()
+   on each, which registers a module-graph node for it (vite importAnalysis ->
+   ensureEntryFromUrl). api/types.ts is 100% type declarations: it has no class
+   names to find, and every importer uses `import type`, so the browser never
+   loads it and Vite never transforms it. Its node therefore has
+   isSelfAccepting === undefined, and Vite's propagateUpdate bails on a
+   not-yet-analyzed module by forcing a full page reload -- which wipes the live
+   conversation. Excluding it from the scan removes the node, so editing it is a
+   no-op for HMR instead of a reload. See RELOAD.md. */
+@source not "./lib/api/types.ts";
+
 @plugin "daisyui" {
   themes: dark --default, light;
   exclude: rootscrollgutter;

@@ -5,11 +5,7 @@ The implementation lives under ``orchestrator/``.  This module stays as the
 stable executable/import surface for Docker, tests, and external callers that
 import ``agent`` directly.
 """
-import sys
 from typing import Any, Dict, Optional
-
-# Add shared module to path for the container layout.
-sys.path.insert(0, "/app")
 
 from prometheus_api.agent import ArtifactReference, EventQueue, PrometheusAgent, RequestContext
 

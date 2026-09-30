@@ -8,7 +8,7 @@ import { FollowupForm } from "./chat/FollowupForm";
 import { WelcomeScreen } from "./chat/WelcomeScreen";
 import { Markdown } from "./Markdown";
 import { ElementList } from "./ElementRenderer";
-import { artifactsToElements } from "@/lib/chainlit/artifactAdapter";
+import { artifactsToElements } from "@/lib/elements/artifactAdapter";
 
 // ---------------------------------------------------------------------------
 // Sub-components
@@ -147,7 +147,7 @@ interface ChatProps {
 }
 
 export function Chat({ scrollContainerRef }: ChatProps) {
-  const { items, awaiting, config } = useChatState();
+  const { items, awaiting, config, resumingConversationId } = useChatState();
   const maxUploadBytes = config?.max_upload_bytes || DEFAULT_MAX_UPLOAD_BYTES;
 
   const [input, setInput] = useState("");
@@ -231,6 +231,10 @@ export function Chat({ scrollContainerRef }: ChatProps) {
   }
   const userCount = items.filter((i) => i.kind === "user").length;
   const hasMessages = items.length > 0;
+  // A resume clears `items` before awaiting, so `hasMessages` alone cannot tell an
+  // empty conversation from one still being fetched — without this the welcome
+  // screen flashed for the whole round trip.
+  const resuming = resumingConversationId !== null;
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -481,7 +485,16 @@ export function Chat({ scrollContainerRef }: ChatProps) {
   return (
     <div className="flex flex-col flex-1 w-full overflow-hidden">
       <div className="relative flex flex-1 min-h-0 overflow-hidden">
-        {!hasMessages ? (
+        {resuming ? (
+          <div
+            className="flex min-w-0 flex-1 flex-col items-center justify-center gap-4"
+            aria-live="polite"
+            aria-label="Loading conversation"
+          >
+            <span className="loading loading-spinner w-16 h-16 text-primary" />
+            <p className="text-lg text-base-content/70">Loading conversation&hellip;</p>
+          </div>
+        ) : !hasMessages ? (
           <WelcomeScreen onSelect={(text) => handleSend(text)} />
         ) : (
           <div
@@ -579,11 +592,14 @@ export function Chat({ scrollContainerRef }: ChatProps) {
                 onKeyDown={handleKeyDown}
                 placeholder="Message..."
                 autoFocus
+                // Until the resume returns, the server session is still bound to the
+                // PREVIOUS conversation, so a turn sent now lands in the wrong one.
+                disabled={resuming}
               />
               <button
                 className="btn btn-primary btn-circle btn-sm absolute bottom-2.5 right-2.5 disabled:opacity-40"
                 onClick={() => (awaiting ? handleStop() : handleSend())}
-                disabled={!awaiting && !input.trim() && readyDescriptors.length === 0}
+                disabled={resuming || (!awaiting && !input.trim() && readyDescriptors.length === 0)}
                 aria-label={awaiting ? "Stop response" : "Send message"}
               >
                 {awaiting ? (

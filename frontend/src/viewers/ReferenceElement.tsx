@@ -9,7 +9,7 @@
  */
 
 import { BookMarked, ExternalLink } from "lucide-react";
-import type { ViewerProps } from "@/lib/chainlit/elements";
+import type { ViewerProps } from "@/lib/elements/elements";
 import type { Citation } from "@/lib/api/types";
 
 interface ReferenceProps {

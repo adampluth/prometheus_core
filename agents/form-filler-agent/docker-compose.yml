@@ -43,6 +43,4 @@ services:
     depends_on:
       litellm:
         condition: service_healthy
-    volumes:
-      - ../../shared:/app/shared
     restart: unless-stopped

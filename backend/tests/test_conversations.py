@@ -40,12 +40,10 @@ def _authed_client(monkeypatch) -> TestClient:
     from app import security
     from app.config import settings
     from app.main import app
-    from app.sessions import SessionStore
 
     monkeypatch.setattr(settings, "jwt_secret", "test-secret", raising=False)
     monkeypatch.setattr(security.settings, "jwt_secret", "test-secret", raising=False)
 
-    app.state.session_store = SessionStore()
     token = security.issue_token(security.User(identifier="alice"), sid="sid-conv")
     client = TestClient(app)
     client.cookies.set(settings.cookie_name, token)
@@ -54,9 +52,7 @@ def _authed_client(monkeypatch) -> TestClient:
 
 def test_recent_requires_auth():
     from app.main import app
-    from app.sessions import SessionStore
 
-    app.state.session_store = SessionStore()
     client = TestClient(app)
     resp = client.get("/api/conversations/recent")
     assert resp.status_code == 401
@@ -364,9 +360,10 @@ def test_get_history_marks_actively_running_conversations_pending(monkeypatch):
             return list(blobs.keys()) if pattern == "conversation:*" else []
 
         def get(self, key):
+            # `blobs` is keyed by the full "conversation:{id}" key, matching what
+            # the history scan passes here -- not by the bare id.
             if key.startswith("conversation:"):
-                conv_id = key.split(":", 1)[1]
-                return _json.dumps(blobs[conv_id]) if conv_id in blobs else None
+                return _json.dumps(blobs[key]) if key in blobs else None
             return status.get(key)
 
         def hgetall(self, key):
@@ -406,6 +403,39 @@ def test_get_transcript_normalizes_and_drops_orchestration_noise(monkeypatch):
     assert messages == [
         {"role": "user", "content": "hello", "timestamp": "t1"},
         {"role": "assistant", "content": "hi there", "timestamp": "t2"},
+    ]
+
+
+def test_get_transcript_collapses_the_duplicate_final_report_turn(monkeypatch):
+    """The client-agent logs each answer twice (``agent_response_*`` then
+    ``final_report``) with identical content; the transcript must show it once."""
+    import json as _json
+
+    from app.conversation_state import ConversationStateClient
+
+    conv = {
+        "conversation_history": [
+            {"role": "user", "content": "mesh it", "timestamp": "t1"},
+            {"role": "assistant", "content": "done", "type": "agent_response_meshing", "timestamp": "t2"},
+            {"role": "assistant", "content": "done", "type": "final_report", "timestamp": "t3"},
+            {"role": "user", "content": "again", "timestamp": "t4"},
+            # Same content as an earlier turn but NOT adjacent -> kept.
+            {"role": "assistant", "content": "done", "type": "final_report", "timestamp": "t5"},
+        ],
+    }
+
+    class _FakeRedis:
+        def get(self, key):
+            return _json.dumps(conv)
+
+    c = ConversationStateClient("redis://x")
+    monkeypatch.setattr(type(c), "client", property(lambda self: _FakeRedis()))
+
+    assert c.get_transcript("c1") == [
+        {"role": "user", "content": "mesh it", "timestamp": "t1"},
+        {"role": "assistant", "content": "done", "timestamp": "t2"},
+        {"role": "user", "content": "again", "timestamp": "t4"},
+        {"role": "assistant", "content": "done", "timestamp": "t5"},
     ]
 
 
@@ -514,9 +544,7 @@ def test_resume_requires_ownership(monkeypatch):
     assert resp.status_code == 404
 
 
-def test_resume_rebinds_session_and_returns_transcript(monkeypatch):
-    from app.main import app
-
+async def test_resume_rebinds_session_and_returns_transcript(monkeypatch, session_store):
     conv = {
         "user_query": "hello",
         "conversation_history": [
@@ -533,7 +561,7 @@ def test_resume_rebinds_session_and_returns_transcript(monkeypatch):
     assert body["conversation_id"] == "c1"
     assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
 
-    session = app.state.session_store.get("sid-conv")
+    session = await session_store.get("sid-conv")
     assert session is not None
     assert session.conversation_id == "c1"
 
@@ -542,12 +570,12 @@ def test_reopening_conversation_does_not_build_previews(monkeypatch):
     """Reopening must stay cheap: artifacts needing a preview carry a lazy
     ``preview_url`` instead of being processed up front (the viewer fetches it once
     scrolled into view)."""
-    from app.services.previews import service as preview_service
+    from app.services.previews import pool as preview_pool
 
-    def _boom(*_):
+    async def _boom(*_):
         raise AssertionError("reopening a conversation must not build previews")
 
-    monkeypatch.setattr(preview_service, "_build_sync", _boom)
+    monkeypatch.setattr(preview_pool, "run_build", _boom)
 
     mesh = {"artifact_id": "m1", "name": "mesh.exo", "mime_type": "application/x-exodus", "uri": "file:///x/mesh.exo"}
     conv = {"user_query": "mesh it", "conversation_history": [{"role": "assistant", "content": "done"}]}
@@ -595,3 +623,37 @@ def test_detail_keeps_artifacts_when_transcript_has_no_reply(monkeypatch):
     messages = client.get("/api/conversations/c1").json()["messages"]
     assert [m["role"] for m in messages] == ["user", "assistant"]
     assert [a["artifact_id"] for a in messages[1]["artifacts"]] == ["a"]
+
+
+async def test_resume_seeds_session_artifacts_with_the_catalog(monkeypatch, session_store):
+    """``session.artifacts`` (what the next turn hands the client-agent) is the catalog
+    resume already read."""
+    fake = _detail_client(monkeypatch, conversations={"c1": {}}, owners={"c1": "alice"})
+    monkeypatch.setattr(fake, "get_artifacts", lambda conv_id: [{"artifact_id": "a1", "name": "n"}], raising=False)
+    client = _authed_client(monkeypatch)
+
+    assert client.post("/api/conversations/c1/resume").status_code == 200
+    session = await session_store.get_or_create("sid-conv")
+    assert session.conversation_id == "c1"
+    assert [a["artifact_id"] for a in session.artifacts] == ["a1"]
+
+
+async def test_superseded_resume_does_not_rebind_or_seed_the_session(monkeypatch, session_store):
+    """Click A, then B: the session must end on B whichever request finishes last.
+
+    Rebinds are ordered by ``bind_seq`` (``SessionStore.reset``), so A's resume landing
+    after B's is still answered — the frontend drops it as superseded — but changes
+    nothing.
+    """
+    fake = _detail_client(monkeypatch, conversations={"A": {}, "B": {}}, owners={"A": "alice", "B": "alice"})
+    monkeypatch.setattr(
+        fake, "get_artifacts", lambda conv_id: [{"artifact_id": f"{conv_id}-art", "name": "n"}], raising=False
+    )
+    client = _authed_client(monkeypatch)
+
+    assert client.post("/api/conversations/B/resume", json={"bind_seq": 20}).status_code == 200
+    assert client.post("/api/conversations/A/resume", json={"bind_seq": 10}).status_code == 200
+
+    session = await session_store.get_or_create("sid-conv")
+    assert session.conversation_id == "B"
+    assert [a["artifact_id"] for a in session.artifacts] == ["B-art"]

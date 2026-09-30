@@ -25,7 +25,6 @@ export type ElementKind =
   | "json"           // CollapsibleJson custom element
   | "suggestions"    // FollowUpSuggestions custom element
   | "plan_viewer"    // PlanViewer custom element
-  | "dynamic_form"   // DynamicForm custom element (ask_form path)
   | "ifc"            // IFCViewer custom element
   | "mesh"           // MeshViewer custom element — shared by Exodus and STL
   | "mermaid"        // Mermaid custom element
@@ -101,7 +100,6 @@ export function classifyElement(el: AnyElement): ElementKind {
       case "CollapsibleJson":     return "json";
       case "FollowUpSuggestions": return "suggestions";
       case "PlanViewer":          return "plan_viewer";
-      case "DynamicForm":         return "dynamic_form";
       case "MermaidViewer":       return "mermaid";
       // Backend COMPONENT_NAME is "ThermalAnalysisViewer", not "ThermalAnalysis"
       // (see prometheus.thermal_analysis.result.v1 plugin __init__.py).
@@ -124,7 +122,6 @@ export function classifyElement(el: AnyElement): ElementKind {
 // Registry — swap null → component as you build each viewer
 // ---------------------------------------------------------------------------
 
-import { DynamicFormElement }                from "../../viewers/DynamicFormElement";
 // prod: lazy — @thatopen/components + three (~5 MB) stay in their own chunk,
 //   fetched only when an IFC element renders. ElementRenderer wraps every
 //   viewer in <Suspense>.
@@ -183,7 +180,6 @@ export const VIEWER_REGISTRY: Partial<Record<ElementKind, ViewerComponent | null
   json:         JSONViewer,
   suggestions:  FollowUpSuggestionsElement,
   plan_viewer:  PlanViewerElement,
-  dynamic_form: DynamicFormElement,
   mermaid:      MermaidElement,
   thermal:      ThermalAnalysisElement,
   report:       ReportElement,
