@@ -47,40 +47,37 @@ function FileList({ label, files }: { label: string; files: string[] }) {
 }
 
 /**
- * Workflow Execution Planner (Figma D.1): the plan's graph on the left and its
- * summary and actions on the right. Side by side from 1024px; below that they
- * stack. Until the graph column is wide enough (xl), the graph keeps a readable
- * size and scrolls sideways in its own area.
- * Display only: the buttons have no handlers yet.
+ * Workflow Execution Planner (Figma D.1): the plan's path, its summary and
+ * actions, and its graph.
+ *
+ * - From xl (1280px), as in D.1: the graph on the left, the summary in a column
+ *   on the right.
+ * - Below xl the summary moves between the path and the graph, as a compact
+ *   band (columns from md), so the totals and actions sit above the tall graph
+ *   and the graph gets the panel's full width.
+ * - Below lg (1024px) the graph keeps its D.1 size and scrolls sideways in its
+ *   own area instead of shrinking to fit.
+ *
+ * DOM order follows the stacked order. Display only: the buttons have no
+ * handlers yet.
  */
 export function WorkflowPlanner({ plan }: { plan: WorkflowPlan }) {
   return (
-    <div className="flex flex-col overflow-hidden rounded-lg border border-base-content/10 bg-base-200 lg:flex-row">
-      <div className="flex min-w-0 flex-1 flex-col gap-4 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 uppercase">
-          {/* Segments wrap at the slashes, never mid-word. */}
-          <span className="flex min-w-0 flex-wrap gap-x-1.5">
-            {plan.path.map((segment, i) => (
-              <span key={segment} className="break-all text-[10px] leading-3 tracking-[0.1em] text-primary">
-                {i > 0 && "/ "}
-                {segment}
-              </span>
-            ))}
-          </span>
-          <span className="text-[10px] leading-3 text-base-content/50">{plan.status}</span>
-        </div>
-        {/* Below xl the graph column is narrower than D.1's, so the graph keeps
-            its size and scrolls sideways rather than shrinking to fit. */}
-        <div className="overflow-x-auto">
-          <WorkflowGraph
-            nodes={plan.nodes}
-            wires={plan.wires}
-            className="h-[628px] w-full min-w-[772px] xl:min-w-0"
-          />
-        </div>
+    <div className="grid grid-cols-1 overflow-hidden rounded-lg border border-base-content/10 bg-base-200 xl:grid-cols-[minmax(0,1fr)_340px] xl:grid-rows-[auto_1fr]">
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-5 py-5 uppercase xl:col-start-1 xl:row-start-1 xl:pb-4">
+        {/* Segments wrap at the slashes, never mid-word. */}
+        <span className="flex min-w-0 flex-wrap gap-x-1.5">
+          {plan.path.map((segment, i) => (
+            <span key={segment} className="break-all text-[10px] leading-3 tracking-[0.1em] text-primary">
+              {i > 0 && "/ "}
+              {segment}
+            </span>
+          ))}
+        </span>
+        <span className="text-[10px] leading-3 text-base-content/50">{plan.status}</span>
       </div>
 
-      <aside className="flex shrink-0 flex-col gap-5 border-t border-base-content/10 p-6 lg:w-80 lg:border-l lg:border-t-0 xl:w-[340px]">
+      <aside className="flex flex-col gap-5 border-y border-base-content/10 p-5 md:grid md:grid-cols-3 md:items-start xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:flex xl:items-stretch xl:border-y-0 xl:border-l xl:p-6">
         <div className="flex flex-col gap-2.5">
           <SectionLabel as="h3">Plan Summary</SectionLabel>
           <dl className="m-0 flex flex-col gap-2 text-[13px]">
@@ -102,12 +99,20 @@ export function WorkflowPlanner({ plan }: { plan: WorkflowPlan }) {
         </div>
         <FileList label="Input Requirements" files={plan.inputs} />
         <FileList label="Expected Outputs" files={plan.outputs} />
-        <div className="flex flex-col gap-2.5 pt-5">
+        <div className="grid gap-2.5 md:col-span-3 md:grid-cols-2 xl:grid-cols-1 xl:pt-5">
           <Button label="Approve & Execute Pipeline" variant="primary" wide />
           {/* TODO(WB-1): opens the Builder. */}
           <Button label="Modify Plan" outline wide />
         </div>
       </aside>
+
+      <div className="overflow-x-auto p-5 xl:col-start-1 xl:row-start-2 xl:pt-0">
+        <WorkflowGraph
+          nodes={plan.nodes}
+          wires={plan.wires}
+          className="h-[628px] w-full min-w-[772px] lg:min-w-0"
+        />
+      </div>
     </div>
   );
 }
