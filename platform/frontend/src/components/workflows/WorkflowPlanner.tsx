@@ -77,7 +77,7 @@ export function WorkflowPlanner({ plan }: { plan: WorkflowPlan }) {
         <span className="text-[10px] leading-3 text-base-content/50">{plan.status}</span>
       </div>
 
-      <aside className="flex flex-col gap-5 border-y border-base-content/10 p-5 md:grid md:grid-cols-3 md:items-start xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:flex xl:items-stretch xl:border-y-0 xl:border-l xl:p-6">
+      <aside className="flex flex-col gap-5 border-y border-base-content/10 p-5 md:grid md:grid-cols-3 md:items-start md:gap-x-10 xl:col-start-2 xl:row-span-2 xl:row-start-1 xl:flex xl:items-stretch xl:border-y-0 xl:border-l xl:p-6">
         <div className="flex flex-col gap-2.5">
           <SectionLabel as="h3">Plan Summary</SectionLabel>
           <dl className="m-0 flex flex-col gap-2 text-[13px]">
