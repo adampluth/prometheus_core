@@ -13,6 +13,7 @@
 import { usePageHeader } from "@/lib/store/pageHeader";
 import { WorkflowConsole } from "../components/workflows/WorkflowConsole";
 import type { WorkflowGraphNode, WorkflowGraphWire } from "../components/workflows/WorkflowGraph";
+import type { WorkflowPlan } from "../components/workflows/WorkflowPlanner";
 import type { WorkflowTemplate } from "../components/workflows/WorkflowTemplateCard";
 
 // Placeholder graph for Comprehensive Material Analysis, laid out as in Figma D.1.
@@ -101,6 +102,19 @@ const TEMPLATES: WorkflowTemplate[] = [
 ];
 const SELECTED_TEMPLATE_ID = "comprehensive-material-analysis";
 
+// Placeholder plan for the selected template, from Figma D.1.
+const EXAMPLE_PLAN: WorkflowPlan = {
+  path: ["Chat", "Workflow Plan", "comprehensive_material_analysis"],
+  status: "Orchestrator: Active | Mode: DAG",
+  nodes: EXAMPLE_NODES,
+  wires: EXAMPLE_WIRES,
+  agents: 5,
+  pipelineTime: "3hr 40s",
+  checkpoints: "2 Active",
+  inputs: ["RC-7_assembly.step", "inlet_velocity_vector.config"],
+  outputs: ["TH_validation_report.pdf", "velocity_vectors.vtu"],
+};
+
 /**
  * Workflows section page: owns the page's data and header. Layout lives in
  * WorkflowConsole. Route params and filters will land here with the router.
@@ -112,7 +126,7 @@ export function PageWorkflows() {
     <WorkflowConsole
       templates={TEMPLATES}
       selectedId={SELECTED_TEMPLATE_ID}
-      graph={{ nodes: EXAMPLE_NODES, wires: EXAMPLE_WIRES }}
+      plan={EXAMPLE_PLAN}
     />
   );
 }
