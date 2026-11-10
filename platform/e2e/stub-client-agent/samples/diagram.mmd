@@ -1,0 +1,6 @@
+flowchart LR
+  A[Upload mesh] --> B{Format?}
+  B -->|Exodus| C[VTK pipeline]
+  B -->|STL| C
+  C --> D[VTP manifest]
+  D --> E[MeshViewer]

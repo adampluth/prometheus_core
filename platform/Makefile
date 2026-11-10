@@ -20,7 +20,7 @@
 NO_ENV_GOALS := help generate clean-generated regenerate test-static check-markings \
 	check-prerequisites base-image cluster-up cluster-down cluster-reset \
 	react-dev react-build react-check react-test-e2e \
-	down down-v logs ps clear-agent-registry clobber clear-admin-users \
+	down down-v down-e2e logs ps clear-agent-registry clobber clear-admin-users \
 	check test-system test-integration test-infra
 #
 # `make -n` (dry run) leaves .env alone: Make would run the rule anyway, since it
@@ -32,7 +32,9 @@ NO_ENV_GOALS := help generate clean-generated regenerate test-static check-marki
 # assignments: only its first % is a wildcard.)
 INIT_ENV_ON_DRY_RUN ?= false
 DRY_RUN := $(strip $(foreach w,$(filter-out --% -O% -I%,$(MAKEFLAGS)),$(if $(findstring =,$(w)),,$(findstring n,$(w)))))
-NEEDS_ENV := $(filter-out $(NO_ENV_GOALS),$(or $(MAKECMDGOALS),help))
+# ENV_READY=true: an outer make (up-e2e) already prepared .env, so only read it
+ENV_READY ?= false
+NEEDS_ENV := $(if $(filter true,$(ENV_READY)),,$(filter-out $(NO_ENV_GOALS),$(or $(MAKECMDGOALS),help)))
 ifneq ($(and $(NEEDS_ENV),$(if $(DRY_RUN),$(filter true,$(INIT_ENV_ON_DRY_RUN)),x)),)
 ifeq ($(MAKE_RESTARTS),)
 # Without this, Ctrl-C while the script runs makes Make delete .env, with the
@@ -116,6 +118,12 @@ PROMETHEUS_SYSTEM_TESTING ?= false
 CLIENT_AGENT_PORT ?= 8001
 PROMETHEUS_SYSTEM_TEST_URL ?= http://localhost:$(CLIENT_AGENT_PORT)
 
+# Set E2E_TESTING=true to start the e2e stack for the frontend's Playwright
+# tests: docker-compose.e2e.yml points the backend at e2e/stub-client-agent,
+# which answers chat turns with fixed replies and sample artifacts, so no LLM
+# key is needed. Use it with PROFILE=prod to test through nginx.
+E2E_TESTING ?= false
+
 # Set PROFILE=prod to bring up the React frontend in production mode instead,
 # or PROFILE= (empty) to exclude the React frontend entirely. Default: dev.
 PROFILE ?= dev
@@ -156,6 +164,9 @@ COMPOSE_FILES := -f $(COMPOSE_BASE)
 ifeq ($(PROMETHEUS_SYSTEM_TESTING),true)
 COMPOSE_FILES += -f docker-compose.system-test.yml
 endif
+ifeq ($(E2E_TESTING),true)
+COMPOSE_FILES += -f docker-compose.e2e.yml
+endif
 ifneq ($(AGENT_COMPOSE_FILES),)
 COMPOSE_FILES += -f $(COMPOSE_AGENTS)
 endif
@@ -171,6 +182,9 @@ endif
 COMPOSE_FILES_NG := -f $(COMPOSE_BASE)
 ifeq ($(PROMETHEUS_SYSTEM_TESTING),true)
 COMPOSE_FILES_NG += -f docker-compose.system-test.yml
+endif
+ifeq ($(E2E_TESTING),true)
+COMPOSE_FILES_NG += -f docker-compose.e2e.yml
 endif
 ifneq ($(wildcard $(COMPOSE_AGENTS)),)
 COMPOSE_FILES_NG += -f $(COMPOSE_AGENTS)
@@ -258,7 +272,7 @@ PREREQUISITE_TARGETS := \
 
 $(PREREQUISITE_TARGETS): check-prerequisites
 
-.PHONY: all up up-fg down down-v build base-image build-plain logs ps generate clean-generated regenerate restart restart-fg ng-up ng-up-fg ng-restart ng-restart-fg init-env clear-agent-registry deeplynx-setup clear-admin-users clobber help
+.PHONY: all up up-fg down down-v build base-image build-plain logs ps generate clean-generated regenerate restart restart-fg up-e2e down-e2e ng-up ng-up-fg ng-restart ng-restart-fg init-env clear-agent-registry deeplynx-setup clear-admin-users clobber help
 
 FORCE:
 
@@ -425,6 +439,20 @@ clobber: ##@ Stop services and delete the DB and Valkey volumes (users, keys, hi
 
 down: ##@ Stop all services
 	$(COMPOSE) $(COMPOSE_FILES) $(PROFILE_FLAGS) down
+
+# The e2e stack is its own compose project on its own host ports, so it runs
+# beside a dev stack without touching it. It skips DeepLynx and the debug and
+# optional agents, which the frontend's e2e tests don't use. up-e2e prepares
+# .env itself, so the make it starts only reads it (ENV_READY=true).
+E2E_STACK := COMPOSE_PROJECT_NAME=prometheus_e2e E2E_TESTING=true PROFILE=prod \
+	LOCAL_DEEPLYNX=false DEBUG_AGENTS=false OPTIONAL_AGENTS=false \
+	REDIS_LOCAL_PORT=6390 BACKEND_PORT=8610 FRONTEND_PROD_PORT=8090
+
+up-e2e: ##@ Start the e2e stack for the frontend's full-stack tests (nginx on http://localhost:8090), beside any dev stack
+	$(MAKE) --no-print-directory up $(E2E_STACK) ENV_READY=true
+
+down-e2e: ##@ Stop the e2e stack and delete its data, so the next run starts fresh
+	$(MAKE) --no-print-directory down-v $(E2E_STACK)
 
 down-v: ##@ Stop all services and remove volumes
 	$(COMPOSE) $(COMPOSE_FILES) $(PROFILE_FLAGS) down -v

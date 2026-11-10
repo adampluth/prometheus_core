@@ -1,0 +1,174 @@
+# This file is part of Prometheus
+# https://inl.gov/super-intelligence/prometheus/
+#
+# Copyright 2026 Battelle Energy Alliance, LLC
+# All rights reserved, see NOTICE.txt for full restrictions
+# https://github.com/idaholab/prometheus_core/blob/main/NOTICE.txt
+#
+# Licensed under the MIT License, please see LICENSE for details
+# https://github.com/idaholab/prometheus_core/blob/main/LICENSE
+#
+# SPDX-License-Identifier: MIT
+
+"""Tests for the e2e stub client-agent: which reply each prompt gets, and the shape the backend reads."""
+
+from __future__ import annotations
+
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+from a2a.server.agent_execution.context import RequestContext
+from a2a.server.events import EventQueue
+from prometheus_api.contract import ConversationResponse
+from starlette.testclient import TestClient
+
+AGENT_DIR = Path(__file__).resolve().parents[1]
+_SPEC = importlib.util.spec_from_file_location("stub_client_agent_module", AGENT_DIR / "agent.py")
+assert _SPEC and _SPEC.loader
+_MODULE = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_MODULE)
+
+
+def _execute(query: str, conversation_id: str = "conv-1") -> tuple[dict, AsyncMock]:
+    agent = _MODULE.StubClientAgent(agent_name="Stub Client Agent")
+    agent.send_status_update = AsyncMock()  # event emission needs a live A2A stack
+    context = MagicMock(spec=RequestContext)
+    context.context_id = "ctx-1"
+    queue = AsyncMock(spec=EventQueue)
+    result = asyncio.run(agent._execute({"query": query, "conversation_id": conversation_id}, context, queue))
+    return result, agent.send_status_update
+
+
+def test_a_plain_prompt_gets_the_fixed_text_answer_and_no_artifact():
+    result, status = _execute("Hello, what can you help me with?")
+
+    assert result["status"] == "answer"
+    assert result["response_text"] == _MODULE.TEXT_ANSWER
+    assert result["conversation_id"] == "conv-1"
+    assert "new_artifacts" not in result
+    status.assert_awaited_once()
+
+
+def test_the_reply_parses_as_the_contract_the_backend_reads():
+    for query in ("hello", "show me the mesh", "the ifc model please", "draw a diagram"):
+        result, _ = _execute(query)
+        # The backend json.loads the final message and validates it as this model
+        parsed = ConversationResponse.model_validate(json.loads(json.dumps(result)))
+        assert parsed.status == "answer"
+
+
+def test_a_mesh_prompt_returns_the_stl_by_url():
+    result, _ = _execute("Show me the MESH")
+
+    (artifact,) = result["new_artifacts"]
+    assert result["artifacts"] == [artifact]
+    assert artifact["name"] == "cube.stl"
+    assert artifact["mime_type"] == "model/stl"
+    assert artifact["uri"] == f"{_MODULE.SAMPLES_BASE_URL}/cube.stl"
+    assert artifact["conversation_id"] == "conv-1"
+    assert artifact["artifact_id"].startswith("e2e-mesh-")
+    assert "json_body" not in artifact
+
+
+def test_an_ifc_prompt_returns_the_model_by_url():
+    result, _ = _execute("open the ifc model")
+
+    (artifact,) = result["new_artifacts"]
+    assert artifact["name"] == "model.ifc"
+    assert artifact["mime_type"] == "model/ifc"
+    assert artifact["uri"].endswith("/model.ifc")
+
+
+def test_a_diagram_prompt_returns_the_mermaid_source_inline():
+    result, _ = _execute("draw the diagram")
+
+    (artifact,) = result["new_artifacts"]
+    assert artifact["mime_type"] == "text/x-mermaid"
+    assert artifact["json_body"]["diagram"].startswith("flowchart")
+    assert "uri" not in artifact
+
+
+def test_each_artifact_gets_its_own_id():
+    first, _ = _execute("mesh")
+    second, _ = _execute("mesh")
+
+    assert first["new_artifacts"][0]["artifact_id"] != second["new_artifacts"][0]["artifact_id"]
+
+
+def test_the_conversation_id_falls_back_to_the_a2a_context():
+    agent = _MODULE.StubClientAgent(agent_name="Stub Client Agent")
+    agent.send_status_update = AsyncMock()
+    context = MagicMock(spec=RequestContext)
+    context.context_id = "ctx-from-a2a"
+    result = asyncio.run(agent._execute({"query": "hi"}, context, AsyncMock(spec=EventQueue)))
+
+    assert result["conversation_id"] == "ctx-from-a2a"
+
+
+def test_every_sample_file_exists_and_names_no_outside_author():
+    for sample in _MODULE.SAMPLES:
+        assert sample.path.is_file(), sample.filename
+    ifc_header = (_MODULE.SAMPLES_DIR / "model.ifc").read_text(encoding="utf-8").split("ENDSEC;")[0]
+    # The IFC model is our own (samples/make_ifc.py), so its header names only the project
+    file_name = next(line for line in ifc_header.splitlines() if line.startswith("FILE_NAME("))
+    # FILE_NAME(name, time, (author), (organization), ...): both are the project
+    assert "('Prometheus project'),('Prometheus project')" in file_name
+    data = (_MODULE.SAMPLES_DIR / "model.ifc").read_text(encoding="utf-8")
+    people = [line for line in data.splitlines() if "IFCPERSON(" in line or "IFCORGANIZATION(" in line]
+    assert people and all("Prometheus" in line for line in people), people
+
+
+def test_the_samples_server_serves_each_file_without_a_token():
+    from starlette.applications import Starlette
+    from starlette.staticfiles import StaticFiles
+
+    app = Starlette()
+    app.mount("/", StaticFiles(directory=_MODULE.SAMPLES_DIR))
+    client = TestClient(app)
+    for sample in _MODULE.SAMPLES:
+        response = client.get(f"/{sample.filename}")
+        assert response.status_code == 200
+        assert response.content == sample.path.read_bytes()
+
+
+def test_serve_samples_runs_uvicorn_on_the_samples_port():
+    with patch("uvicorn.Server") as server_cls:
+        server_cls.return_value.serve = AsyncMock()
+        asyncio.run(_MODULE.serve_samples())
+
+    config = server_cls.call_args.args[0]
+    assert config.port == _MODULE.SAMPLES_PORT
+    assert config.host == "0.0.0.0"
+
+
+def test_start_samples_server_runs_it_on_a_daemon_thread():
+    with patch("threading.Thread") as thread_cls:
+        _MODULE._start_samples_server()
+
+    assert thread_cls.call_args.kwargs["daemon"] is True
+    thread_cls.return_value.start.assert_called_once()
+
+
+def test_main_starts_the_samples_server_then_the_agent_on_its_port(monkeypatch):
+    monkeypatch.setenv("AGENT_PORT", "8123")
+    order = []
+    with patch.object(_MODULE, "_start_samples_server", side_effect=lambda: order.append("samples")), \
+         patch.object(_MODULE.StubClientAgent, "run", autospec=True,
+                      side_effect=lambda self, port: order.append(("agent", port))):
+        _MODULE.main()
+
+    assert order == ["samples", ("agent", 8123)]
+
+
+def test_the_executor_runs_the_stub_without_a_deeplynx_execution_record():
+    from prometheus_api.agent.base import DelegatingPrometheusAgentExecutor
+
+    agent = _MODULE.StubClientAgent(agent_name="Stub Client Agent")
+    executor = agent.create_executor()
+
+    assert isinstance(executor, DelegatingPrometheusAgentExecutor)
+    assert executor._execution_scope is None
+    assert executor._execute_fn == agent._execute

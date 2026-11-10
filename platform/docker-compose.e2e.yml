@@ -1,0 +1,58 @@
+# The e2e stack: the full platform for the frontend's Playwright tests, with
+# e2e/stub-client-agent answering chat turns instead of the client-agent, so
+# no LLM key is needed. Added to the compose files by `make up E2E_TESTING=true`.
+# See platform/frontend/README.md, "End-to-end tests".
+#
+# YAML anchors don't cross compose files, so values the base file shares through
+# anchors are written out here.
+services:
+  backend:
+    environment:
+      CLIENT_AGENT_URL: http://stub-client-agent:8000
+
+  stub-client-agent:
+    build:
+      context: ./e2e/stub-client-agent
+      args:
+        - PROMETHEUS_API_BASE_IMAGE_REPO=${PROMETHEUS_API_BASE_IMAGE_REPO}
+        - PROMETHEUS_API_BASE_IMAGE_HASH=${PROMETHEUS_API_BASE_IMAGE_HASH}
+        - HTTP_PROXY=${HTTP_PROXY:-}
+        - HTTPS_PROXY=${HTTPS_PROXY:-}
+        - NO_PROXY=${NO_PROXY:-}
+    networks:
+      - agent-network
+    environment:
+      AGENT_PORT: 8000
+      SAMPLES_PORT: 8100
+      SAMPLES_BASE_URL: http://stub-client-agent:8100
+      EXTERNAL_AGENT_URL: http://stub-client-agent:8000
+      AGENT_SECRET: ${AGENT_SECRET}
+      AGENT_SECRET_REQUIRED: ${AGENT_SECRET_REQUIRED:-true}
+      REGISTRY_URL: ${REGISTRY_URL:-http://backend:8000}
+      # The SDK sends this as its registry token; the backend registry checks AGENT_SECRET.
+      LITELLM_MASTER_KEY: ${AGENT_SECRET}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWKS_URL: ${JWKS_URL:-http://backend:8000/.well-known/jwks.json}
+      USER_IDENTITY_PUBLIC_KEY: ${USER_IDENTITY_PUBLIC_KEY:-}
+      USER_IDENTITY_ISS: ${USER_IDENTITY_ISS:-prometheus-platform}
+      USER_IDENTITY_AUD: ${USER_IDENTITY_AUD:-prometheus-agents}
+      USER_IDENTITY_REQUIRED: ${USER_IDENTITY_REQUIRED:-true}
+      # The SDK checks at startup that DeepLynx is configured, but the stub never
+      # stores an artifact, so it never connects: placeholders are enough
+      DEEPLYNX_KEY: e2e-not-used
+      DEEPLYNX_SECRET: e2e-not-used
+      DEEPLYNX_ORG_ID: "1"
+      DEEPLYNX_PROJECT_ID: "1"
+      PYTHONDONTWRITEBYTECODE: 1
+    depends_on:
+      backend:
+        condition: service_healthy
+    # /healthz is served by the PrometheusAgent base class once uvicorn is up.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
